@@ -1,6 +1,6 @@
 # TDOS-002: Message details sheet
 
-**Type:** feature  **Status:** open  **Area:** Messages  **Depends on:** TDOS-001
+**Type:** feature  **Status:** done  **Area:** Messages  **Depends on:** TDOS-001
 
 ## Why
 The inline line (TDOS-001) is deliberately short. A details view gives the full story of one
@@ -52,6 +52,21 @@ Everything marked * needs new capture work; the rest comes from TDOS-001.
 - Bots on the channel answer "test" messages with the hop count they saw
   (`ACK | Path: 22 hops`, `Copy in Crestview FL ... 11 hops`). That is useful ground truth to compare
   against our own hop count.
+
+## As built
+- **Long-press** a bubble to open the sheet (a short tap on someone else's channel message still
+  inserts the reply mention). Back returns to the conversation.
+- Received messages show: sender, received time, the sender's own timestamp, the **clock difference**
+  (flagged when over 10 minutes), route (flood with hop count, heard directly, or routed), SNR and RSSI
+  of the last hop, **times heard**, payload size with estimated airtime, the **repeater path** with each
+  hop named when exactly one known repeater matches (otherwise the hash and how many match), and a
+  **Show on map** button when the sender's position is known.
+- Sent messages show recipient, send time, status, round trip and length.
+- Extra data is stored in a new SD record type `D`, written after each received message, so history
+  from before this change simply lacks the detail rows.
+- "Times heard" is live: duplicate copies are counted while a packet is still in MeshCore's recent
+  table (about 160 packets); it reads "once" for older messages.
+- Not done: the per-copy paths of duplicates, and a route drawn on the map.
 
 ## Decisions
 - No further metrics wanted beyond those listed.

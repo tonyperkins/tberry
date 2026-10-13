@@ -115,6 +115,9 @@ static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, u
     m.hops = info->hops; m.snr4 = info->snr4; m.rssi = info->rssi; m.flags = info->flags;
     strncpy(m.sender, info->sender, sizeof(m.sender) - 1);
     m.sender[sizeof(m.sender) - 1] = 0;
+    m.d = info->d;
+  } else {
+    memset(&m.d, 0, sizeof(m.d));
   }
   cleanText(m.text, sizeof(m.text), text);
   if (ts > c.lastTs) c.lastTs = ts;
@@ -159,6 +162,15 @@ static void setStatusInternal(int conv, uint32_t id, uint8_t status, uint16_t rt
 void msgs_set_status(int conv, uint32_t id, uint8_t status, uint16_t rtt100) { setStatusInternal(conv, id, status, rtt100, false); }
 void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt100) { setStatusInternal(conv, id, status, rtt100, true); }
 void msgs_set_sink(const MsgSink* s) { sink = s; }
+
+void msgs_set_detail_loaded(int conv, uint32_t id, const MsgDetail& d) {
+  if (conv < 0 || conv >= MAX_CONVS || !convs[conv].used) return;
+  Conv& c = convs[conv];
+  for (int i = 0; i < c.count; i++) {
+    Msg& m = c.msgs[(c.start + i) % MSGS_PER_CONV];
+    if (m.id == id) { m.d = d; return; }
+  }
+}
 
 void msgs_mark_read(int conv) {
   if (conv >= 0 && conv < MAX_CONVS && convs[conv].used && (convs[conv].unread || convs[conv].mentionUnread)) {

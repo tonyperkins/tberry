@@ -14,6 +14,17 @@ enum MsgFlag : uint8_t {
   MF_MENTION = 4,    // the text mentions this node's name as @[Name]
 };
 
+// How a received message travelled (TDOS-002). All of it is optional.
+struct MsgDetail {
+  uint32_t senderTs;     // the sender's own clock when it sent; 0 if unknown
+  uint16_t payloadLen;   // payload bytes
+  uint16_t airMs;        // estimated time on air at our radio settings
+  uint8_t hash4[4];      // start of the packet hash: identifies duplicate copies of a flood
+  uint8_t pathCount;     // repeaters the packet passed through (as recorded, at most 8 kept)
+  uint8_t pathSize;      // bytes per repeater hash, 1 to 3
+  uint8_t path[24];      // the hashes, in order
+};
+
 // What the radio told us about a received message (TDOS-001) and who sent it (TDOS-003).
 struct MsgInfo {
   int8_t hops;       // repeaters passed through; -1 unknown
@@ -21,6 +32,7 @@ struct MsgInfo {
   int16_t rssi;      // RSSI of the last hop in dBm
   uint8_t flags;     // MsgFlag
   char sender[32];   // the sender's name exactly as transmitted (channel messages), else empty
+  MsgDetail d;
 };
 
 struct Msg {
@@ -34,6 +46,7 @@ struct Msg {
   int16_t rssi;
   uint8_t flags;
   char sender[32];   // raw sender name, kept unsanitised so a reply mention matches exactly
+  MsgDetail d;
   char text[164];
 };
 
@@ -80,5 +93,6 @@ void msgs_set_sink(const MsgSink* sink);
 // Insert a message read back from storage: keeps its id, is never unread, and is not re-saved.
 uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status);
 uint32_t msgs_add_loaded_info(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status, const MsgInfo& info);
-void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt100 = 0);   // same, for a status record
+void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt100 = 0);
+void msgs_set_detail_loaded(int conv, uint32_t id, const MsgDetail& d);   // same, for a status record
                                               // changes whenever anything does

@@ -30,6 +30,7 @@
 #include "settings.h"
 #include "storage.h"
 #include "audio.h"
+#include "dupcount.h"
 #include "reaction.h"
 #include "nodes.h"
 #include "rangetest.h"
@@ -96,6 +97,8 @@ static void chatPush(const char* fmt, ...) {
   vsnprintf(chatBuf[CHAT_LINES - 1], sizeof(chatBuf[0]), fmt, ap);
   va_end(ap);
 }
+
+extern CustomSX1262 radio;               // defined below; the mesh node asks it for time on air
 
 // ── The mesh node ────────────────────────────────────────────────
 class DeckMesh : public BaseChatMesh {
@@ -202,7 +205,7 @@ protected:
     nodes_seen(from.id.pub_key, from.name, from.type, getRTCClock()->getCurrentTime(),
                (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), -1);
     int conv = msgs_ensure(from.id.pub_key, from.name, false);
-    MsgInfo info = radioInfo(pkt);
+    MsgInfo info = radioInfo(pkt, ts);
     strncpy(info.sender, from.name, sizeof(info.sender) - 1);
     msgs_add_info(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
     audio_play(SND_RECEIVE);                // a direct message always chimes
@@ -211,7 +214,7 @@ protected:
   }
 
   // What the radio knew about a received packet. SNR and RSSI belong to the last hop only.
-  MsgInfo radioInfo(const mesh::Packet* pkt) {
+  MsgInfo radioInfo(const mesh::Packet* pkt, uint32_t senderTs) {
     MsgInfo i = {};
     i.flags = MF_RADIO;
     i.snr4 = pkt->_snr;
@@ -221,6 +224,18 @@ protected:
       i.hops = (int8_t)min<int>(pkt->getPathHashCount(), 63);
     } else {
       i.hops = -1;                          // routed straight to us: the hop list has been consumed
+    }
+    // How it travelled, for the message details sheet.
+    i.d.senderTs = senderTs;
+    i.d.payloadLen = pkt->payload_len;
+    i.d.airMs = (uint16_t)min<uint32_t>(65535, radio.getTimeOnAir(pkt->getRawLength()) / 1000);
+    uint8_t h[MAX_HASH_SIZE];
+    pkt->calculatePacketHash(h);
+    memcpy(i.d.hash4, h, 4);
+    if (pkt->isRouteFlood()) {
+      i.d.pathSize = pkt->getPathHashSize();
+      i.d.pathCount = (uint8_t)min<int>(pkt->getPathHashCount(), 8);
+      memcpy(i.d.path, pkt->path, min<size_t>(sizeof(i.d.path), (size_t)i.d.pathCount * i.d.pathSize));
     }
     return i;
   }
@@ -234,11 +249,11 @@ protected:
   }
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onSignedMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const uint8_t*, const char*) override {}
-  void onChannelMessageRecv(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t, const char* text) override {
+  void onChannelMessageRecv(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t ts, const char* text) override {
     lastHeardMs = millis();
     // Channel text arrives as "Sender: body". Keep the sender exactly as sent so a reply can mention
     // them byte for byte, and store the body on its own.
-    MsgInfo info = radioInfo(pkt);
+    MsgInfo info = radioInfo(pkt, ts);
     const char* body = text;
     const char* sep = strstr(text, ": ");
     if (sep && sep > text && (size_t)(sep - text) < sizeof(info.sender)) {
@@ -399,7 +414,7 @@ CustomSX1262Wrapper radio_driver(radio, board);
 StubSensors sensors;
 static ESP32RTCClock rtc;
 static StdRNG fastRng;
-static SimpleMeshTables tables;
+CountingTables tables;                 // also read by ui.cpp for "heard N times"
 static DeckMesh* theMesh = nullptr;
 
 static bool radioOk = false, kbOk = false;

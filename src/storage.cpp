@@ -15,6 +15,9 @@ struct __attribute__((packed)) RecM { uint8_t type; uint8_t out; uint8_t status;
 // 'N' = message with radio info and the raw sender (TDOS-001/003). Followed by the sender, then the text.
 struct __attribute__((packed)) RecN { uint8_t type; uint8_t out; uint8_t status; uint8_t len; uint32_t id; uint32_t ts;
                                       int8_t hops; int8_t snr4; int16_t rssi; uint8_t flags; uint8_t senderLen; };
+// 'D' = how a message travelled (TDOS-002); applies to the message with the same id.
+struct __attribute__((packed)) RecD { uint8_t type; uint8_t pathCount; uint8_t pathSize; uint8_t pad; uint8_t hash4[4];
+                                      uint32_t id; uint32_t senderTs; uint16_t payloadLen; uint16_t airMs; uint8_t path[24]; };
 struct __attribute__((packed)) RecS { uint8_t type; uint8_t status; uint16_t rtt100; uint32_t id; };   // rtt100 was padding: old files read as 0
 
 // ── write queue (filled by the store's sink, drained by storage_tick) ──
@@ -28,6 +31,7 @@ struct Ev {
   int16_t rssi;
   uint8_t flags;
   char sender[32];
+  MsgDetail d;
   char text[164];
 };
 static constexpr int QN = 48;
@@ -49,7 +53,14 @@ static void sinkAdd(const uint8_t key[4], const Msg& m) {
   e.hops = m.hops; e.snr4 = m.snr4; e.rssi = m.rssi; e.flags = m.flags;
   strncpy(e.sender, m.sender, sizeof(e.sender) - 1);
   strncpy(e.text, m.text, sizeof(e.text) - 1);
+  e.d = m.d;
   push(e);
+  if (!m.out && (m.d.payloadLen || m.d.pathCount || m.d.senderTs)) {      // the detail follows its message
+    Ev x = {};
+    memcpy(x.key, key, 4);
+    x.kind = 'D'; x.id = m.id; x.d = m.d;
+    push(x);
+  }
 }
 static void sinkStatus(const uint8_t key[4], uint32_t id, uint8_t status, uint16_t rtt100) {
   if (!ready) return;
@@ -74,6 +85,13 @@ static void writeEvent(const Ev& e) {
     f.write((const uint8_t*)&r, sizeof(r));
     f.write((const uint8_t*)e.sender, r.senderLen);
     f.write((const uint8_t*)e.text, r.len);
+  } else if (e.kind == 'D') {
+    RecD r = {};
+    r.type = 'D'; r.pathCount = e.d.pathCount; r.pathSize = e.d.pathSize; r.id = e.id;
+    memcpy(r.hash4, e.d.hash4, 4);
+    r.senderTs = e.d.senderTs; r.payloadLen = e.d.payloadLen; r.airMs = e.d.airMs;
+    memcpy(r.path, e.d.path, sizeof(r.path));
+    f.write((const uint8_t*)&r, sizeof(r));
   } else {
     RecS r = { 'S', e.status, e.rtt100, e.id };
     f.write((const uint8_t*)&r, sizeof(r));
@@ -119,6 +137,14 @@ static void compact(int conv) {
       RecS s = { 'S', m->status, m->rtt100, m->id };
       f.write((const uint8_t*)&s, sizeof(s));
     }
+    if (!m->out && (m->d.payloadLen || m->d.pathCount || m->d.senderTs)) {
+      RecD d = {};
+      d.type = 'D'; d.pathCount = m->d.pathCount; d.pathSize = m->d.pathSize; d.id = m->id;
+      memcpy(d.hash4, m->d.hash4, 4);
+      d.senderTs = m->d.senderTs; d.payloadLen = m->d.payloadLen; d.airMs = m->d.airMs;
+      memcpy(d.path, m->d.path, sizeof(d.path));
+      f.write((const uint8_t*)&d, sizeof(d));
+    }
   }
   f.close();
 }
@@ -163,6 +189,16 @@ void storage_load_messages() {
         if (f.read((uint8_t*)text, r.len) != r.len) break;
         info.hops = r.hops; info.snr4 = r.snr4; info.rssi = r.rssi; info.flags = r.flags;
         msgs_add_loaded_info(conv, r.id, r.out, text, r.ts, r.status, info);
+        records++;
+      } else if (type == 'D') {
+        RecD r;
+        if (f.read((uint8_t*)&r, sizeof(r)) != sizeof(r)) break;
+        MsgDetail d = {};
+        d.pathCount = r.pathCount; d.pathSize = r.pathSize; d.senderTs = r.senderTs;
+        d.payloadLen = r.payloadLen; d.airMs = r.airMs;
+        memcpy(d.hash4, r.hash4, 4);
+        memcpy(d.path, r.path, sizeof(d.path));
+        msgs_set_detail_loaded(conv, r.id, d);
         records++;
       } else if (type == 'S') {
         RecS r;

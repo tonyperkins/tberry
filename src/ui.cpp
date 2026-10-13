@@ -20,6 +20,7 @@
 #include "audio.h"
 #include "reaction.h"
 #include "mention.h"
+#include "dupcount.h"
 
 extern TFT_eSPI tft;
 
@@ -66,7 +67,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -112,7 +113,8 @@ static int convOrder[MAX_CONVS], convN = 0;
 static int curConv = -1;                 // conversation open in the thread view
 static constexpr int THREAD_WINDOW = 36;       // newest messages drawn; older ones stay in the store
 static lv_obj_t* threadRows[MSGS_PER_CONV];
-static int mapReturnConv = -1;           // conversation to go back to when the map was opened from a message
+static int mapReturnConv = -1;
+static int detailConv = -1, detailIdx = -1;     // message shown on the details sheet           // conversation to go back to when the map was opened from a message
 static uint32_t shownVersion = 0;
 static char dbgCache[720];
 static int unreadShown = -1;
@@ -211,6 +213,7 @@ static void showHome();
 static void openApp(int i);
 static void openMap();
 static void openMapFocus(double lat, double lon, const char* name);
+static void openMessageDetails(int conv, int idx);
 static void openNodes();
 static void openStatus();
 static void openConvs();
@@ -284,6 +287,7 @@ static void goBack() {
     return;
   }
   if (mode == M_THREAD) { openConvs(); return; }
+  if (mode == M_DETAIL) { int c = detailConv; detailConv = -1; openThread(c); return; }
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
     if (returnTo == M_ADV) openAdvanced();
     else if (returnTo == M_SIGNAL) openSignal();
@@ -460,6 +464,9 @@ static void insertMention(const char* sender) {
   lv_textarea_set_text(taInput, buf);
   lv_textarea_set_cursor_pos(taInput, LV_TEXTAREA_CURSOR_LAST);
 }
+static void bubbleHoldCb(lv_event_t* e) {
+  openMessageDetails(curConv, (int)(intptr_t)lv_event_get_user_data(e));
+}
 static void bubbleTapCb(lv_event_t* e) {
   const Conv* c = msgs_conv(curConv);
   const Msg* m = msgs_at(curConv, (int)(intptr_t)lv_event_get_user_data(e));
@@ -611,10 +618,10 @@ static void buildThread() {
       lv_obj_set_style_border_width(b, 2, 0);
       lv_obj_set_style_border_color(b, C(ACCENT), 0);
     }
-    if (channelIn) {                                   // tap = reply to this person
-      lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-      lv_obj_add_event_cb(b, bubbleTapCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-    }
+    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+    if (channelIn)                                     // short tap = reply to this person
+      lv_obj_add_event_cb(b, bubbleTapCb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)i);
+    lv_obj_add_event_cb(b, bubbleHoldCb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)i);   // hold = details
 
     char shown[200];
     emoji_filter(m->text, shown, sizeof(shown), true);
@@ -835,6 +842,7 @@ static void newListBox(lv_obj_t* scr) {
 static void settingsAct(int id);
 static void advAct(int id);
 static void pickChoose(int idx);
+static void detailAct(int id);
 
 static void listRowCb(lv_event_t* e) {
   int id = (int)(intptr_t)lv_event_get_user_data(e);
@@ -842,6 +850,7 @@ static void listRowCb(lv_event_t* e) {
   if (mode == M_SETTINGS) settingsAct(id);
   else if (mode == M_ADV) advAct(id);
   else if (mode == M_PICK) pickChoose(id);
+  else if (mode == M_DETAIL) detailAct(id);
 }
 
 static lv_obj_t* addRow(const char* title, const char* value, int id, RowKind kind, bool on = false) {
@@ -1865,6 +1874,133 @@ static void openMapFocus(double lat, double lon, const char* name) {
   mapReturnConv = keep;                      // openMap() clears it for the ordinary case
 }
 
+// ── Message details: how a message travelled (TDOS-002) ──────────
+static void formatClockSec(uint32_t ts, char* out, size_t n) {
+  out[0] = 0;
+  if (ts < 1700000000UL) return;
+  struct tm tm;
+  localTime(ts, tm);
+  int h12 = tm.tm_hour % 12 == 0 ? 12 : tm.tm_hour % 12;
+  snprintf(out, n, "%d:%02d:%02d %s", h12, tm.tm_min, tm.tm_sec, tm.tm_hour < 12 ? "AM" : "PM");
+}
+
+// Name a path hash from the repeaters we know. One byte only has 256 values, so this is often
+// ambiguous: say so rather than guess.
+static void hopName(const uint8_t* hash, int size, char* out, size_t n) {
+  int matches = 0;
+  const NodeInfo* hit = nullptr;
+  for (int i = 0; i < nodes_count(); i++) {
+    const NodeInfo* ni = nodes_sorted(i);
+    if (!ni || (ni->type != 2 && ni->type != 3)) continue;
+    if (memcmp(ni->key, hash, size > 4 ? 4 : size) == 0) { matches++; if (!hit) hit = ni; }
+  }
+  char hex[10] = "";
+  for (int k = 0; k < size && k < 3; k++) snprintf(hex + strlen(hex), sizeof(hex) - strlen(hex), "%02X", hash[k]);
+  if (matches == 1) {
+    char nm[40];
+    emoji_filter(hit->name, nm, sizeof(nm), false);
+    snprintf(out, n, "%s", nm);
+  } else if (matches > 1) {
+    snprintf(out, n, "%s (%d match)", hex, matches);
+  } else {
+    snprintf(out, n, "%s (unknown)", hex);
+  }
+}
+
+static void openMessageDetails(int conv, int idx) {
+  const Conv* c = msgs_conv(conv);
+  const Msg* m = msgs_at(conv, idx);
+  if (!c || !m) return;
+  mode = M_DETAIL;
+  detailConv = conv;
+  detailIdx = idx;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Message");
+  newListBox(s);
+  listSel = 0;
+
+  char b[64], t[24];
+  char who[48];
+  emoji_filter(m->out ? c->name : (m->sender[0] ? m->sender : c->name), who, sizeof(who), false);
+  addRow(m->out ? "To" : "From", who, 0, K_INFO);
+
+  if (m->out) {
+    formatClockSec(m->ts, t, sizeof(t));
+    if (t[0]) addRow("Sent", t, 1, K_INFO);
+    const char* st = m->status == MS_DELIVERED ? "Delivered" : m->status == MS_SENT ? "Sent, no reply yet"
+                   : m->status == MS_FAILED ? "Not delivered" : "Sending";
+    addRow("Status", st, 2, K_INFO);
+    if (m->rtt100) { snprintf(b, sizeof(b), "%.1f s", m->rtt100 / 10.0f); addRow("Round trip", b, 3, K_INFO); }
+    snprintf(b, sizeof(b), "%u characters", (unsigned)strlen(m->text));
+    addRow("Length", b, 4, K_INFO);
+  } else {
+    formatClockSec(m->ts, t, sizeof(t));
+    if (t[0]) addRow("Received", t, 1, K_INFO);
+    if (m->d.senderTs) {
+      char st[24];
+      formatClockSec(m->d.senderTs, st, sizeof(st));
+      if (st[0]) addRow("Sent (their clock)", st, 2, K_INFO);
+      if (m->ts >= 1700000000UL) {
+        long diff = (long)m->ts - (long)m->d.senderTs;
+        long ad = diff < 0 ? -diff : diff;
+        if (ad < 120) snprintf(b, sizeof(b), "%+ld s", diff);
+        else if (ad < 7200) snprintf(b, sizeof(b), "%+ld min", diff / 60);
+        else snprintf(b, sizeof(b), "%+ld h", diff / 3600);
+        if (ad > 600) strncat(b, ", clock looks wrong", sizeof(b) - strlen(b) - 1);
+        addRow("Clock difference", b, 3, K_INFO);
+      }
+    }
+    if (m->flags & MF_RADIO) {
+      if (!(m->flags & MF_FLOOD)) snprintf(b, sizeof(b), "Routed to us");
+      else if (m->hops == 0) snprintf(b, sizeof(b), "Heard directly");
+      else snprintf(b, sizeof(b), "Flood, %d hop%s", m->hops, m->hops == 1 ? "" : "s");
+      addRow("Route", b, 4, K_INFO);
+      char sn[16];
+      formatSnr(m->snr4, sn, sizeof(sn));
+      snprintf(b, sizeof(b), "SNR %s, RSSI %d", sn, m->rssi);
+      addRow("Last hop", b, 5, K_INFO);
+    }
+    if (m->d.hash4[0] || m->d.hash4[1] || m->d.hash4[2] || m->d.hash4[3]) {
+      uint8_t extra = tables.extraCopies(m->d.hash4);
+      if (extra == 0) snprintf(b, sizeof(b), "once");
+      else snprintf(b, sizeof(b), "%u times", (unsigned)extra + 1);
+      addRow("Heard", b, 6, K_INFO);
+    }
+    if (m->d.payloadLen) {
+      snprintf(b, sizeof(b), "%u bytes, about %u ms", (unsigned)m->d.payloadLen, (unsigned)m->d.airMs);
+      addRow("Size and airtime", b, 7, K_INFO);
+    }
+    if (m->d.pathCount > 0 && m->d.pathSize >= 1 && m->d.pathSize <= 3) {
+      snprintf(b, sizeof(b), "%u repeater%s%s", (unsigned)m->d.pathCount, m->d.pathCount == 1 ? "" : "s",
+               m->hops > m->d.pathCount ? " (first of more)" : "");
+      addRow("Path", b, 8, K_INFO);
+      for (int h = 0; h < m->d.pathCount && listN < 20; h++) {
+        char hop[48], title[12];
+        hopName(m->d.path + h * m->d.pathSize, m->d.pathSize, hop, sizeof(hop));
+        snprintf(title, sizeof(title), "  Hop %d", h + 1);
+        addRow(title, hop, 20 + h, K_INFO);
+      }
+    }
+    int32_t la, lo;
+    char nm[40];
+    if (messagePosition(c, m, &la, &lo, nm, sizeof(nm))) addRow("Where it came from", "Show on map", 100, K_BUTTON);
+  }
+  listHighlight();
+  loadApp(s);
+}
+
+static void detailAct(int id) {
+  if (id != 100) return;
+  const Conv* c = msgs_conv(detailConv);
+  const Msg* m = msgs_at(detailConv, detailIdx);
+  int32_t la, lo;
+  char who[40], shown[48];
+  if (!c || !m || !messagePosition(c, m, &la, &lo, who, sizeof(who))) return;
+  mapReturnConv = detailConv;
+  emoji_filter(who, shown, sizeof(shown), false);
+  openMapFocus(la / 1e6, lo / 1e6, shown);
+}
+
 // ── building the screens ─────────────────────────────────────────
 static void buildStatusBar() {
   bar = box(lv_layer_top(), 320, 22, INK, 0);
@@ -2168,6 +2304,8 @@ void ui_nav(int dx, int dy) {
     lv_obj_scroll_by(stBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_MAP) {
     mapview_pan(dx * 48, dy * 48);
+  } else if (mode == M_DETAIL && dy && listBox) {
+    lv_obj_scroll_by(listBox, 0, -dy * 38, LV_ANIM_OFF);
   } else if (mode == M_NODES && dy && nodesBox) {
     lv_obj_scroll_by(nodesBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_BRIGHT && dx && brightSlider) {
@@ -2234,7 +2372,7 @@ void ui_key(char c) {
     if (c == 8 || c == 127) { if (pinLen == 0) goBack(); else ui_pin_key(9); return; }
     return;
   }
-  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS) && (c == 8 || c == 127)) { goBack(); return; }
+  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS || mode == M_DETAIL) && (c == 8 || c == 127)) { goBack(); return; }
 }
 
 bool ui_console_active() { return mode == M_DBG; }
