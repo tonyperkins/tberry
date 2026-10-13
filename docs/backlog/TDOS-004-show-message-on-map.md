@@ -1,6 +1,6 @@
 # TDOS-004: Show a message's origin on the map
 
-**Type:** feature  **Status:** open  **Area:** Messages, Map  **Depends on:** TDOS-002 (for the entry point)
+**Type:** feature  **Status:** done  **Area:** Messages, Map  **Depends on:** TDOS-002 (for the entry point)
 
 ## Why
 If a message came from somewhere, seeing where on the map is the quickest way to judge range and
@@ -43,6 +43,16 @@ Coordinates typed into message text (option B) are not part of the convention an
   position to the saved contact record or accept that old messages lose the pin until the node is
   heard again. Worth deciding.
 - Privacy: this only displays positions other nodes chose to broadcast.
+
+## As built
+- A received message from a node with a known position gets a **crosshair after its info line**
+  (`9:22 AM  3 hops  SNR 7.25  ⌖`), in amber. Tapping that line opens the map on the sender.
+- The map opens at zoom 14 centred on the sender, with an amber ring and the name, and the info bar
+  reads `12.3 km NE of you` (or `no GPS fix for distance`). Back returns to the same conversation.
+- Positions are persisted in `/nodepos` (key prefix and latitude/longitude, saved with the contacts),
+  since MeshCore's contact file has no position fields. Messages still get their marker after a reboot.
+- Channel messages match by sender **name**; direct messages by key.
+- Not done: the long-press details sheet entry (waits for TDOS-002), drawing the route.
 
 ## Open questions
 - Should the map also draw the **route** (the repeaters from TDOS-002 that have positions) as a line

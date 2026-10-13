@@ -97,6 +97,24 @@ static bool active = false;
 struct Marker { lv_obj_t* dot; lv_obj_t* name; };
 static Marker markers[MAX_MARKERS];
 static lv_obj_t* meDot = nullptr;
+// A place the user asked to see (TDOS-004): where a message came from.
+static bool focusOn = false;
+static double focusLat = 0, focusLon = 0;
+static char focusName[40] = "";
+static lv_obj_t *focusRing = nullptr, *focusLbl = nullptr;
+
+// Great-circle distance in km and compass point of the bearing from (a) to (b).
+static double distanceKm(double la1, double lo1, double la2, double lo2, const char** dir) {
+  const double R = 6371.0, d2r = M_PI / 180.0;
+  double p1 = la1 * d2r, p2 = la2 * d2r, dp = (la2 - la1) * d2r, dl = (lo2 - lo1) * d2r;
+  double h = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2);
+  double dist = 2 * R * asin(sqrt(h));
+  double y = sin(dl) * cos(p2), x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl);
+  double brg = fmod(atan2(y, x) / d2r + 360.0, 360.0);
+  static const char* const pts[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+  if (dir) *dir = pts[(int)((brg + 22.5) / 45.0) % 8];
+  return dist;
+}
 
 static double worldSize(int z) { return (double)TILE * (double)(1UL << z); }
 static void toWorld(double lat, double lon, int z, double& x, double& y) {
@@ -174,8 +192,17 @@ static void render() {
 
   double lat, lon;
   fromWorld(cx, cy, zoom, lat, lon);
-  char b[64];
-  snprintf(b, sizeof(b), "z%d  %.4f, %.4f", zoom, lat, lon);
+  char b[96];
+  if (focusOn && haveOwn) {
+    const char* dir = "";
+    double km = distanceKm(ownLat, ownLon, focusLat, focusLon, &dir);
+    if (km < 1.0) snprintf(b, sizeof(b), "%.0f m %s of you  z%d", km * 1000.0, dir, zoom);
+    else snprintf(b, sizeof(b), "%.1f km %s of you  z%d", km, dir, zoom);
+  } else if (focusOn) {
+    snprintf(b, sizeof(b), "no GPS fix for distance  z%d", zoom);
+  } else {
+    snprintf(b, sizeof(b), "z%d  %.4f, %.4f", zoom, lat, lon);
+  }
   lv_label_set_text(info, b);
 }
 
@@ -212,6 +239,28 @@ static void placeMarkers() {
       else lv_obj_add_flag(meDot, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(meDot, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (focusRing && focusLbl) {
+    if (focusOn) {
+      double wx, wy;
+      toWorld(focusLat, focusLon, zoom, wx, wy);
+      int x = (int)lround(wx - (cx - VIEW_W / 2.0));
+      int y = (int)lround(wy - (cy - VIEW_H / 2.0));
+      bool vis = x > -20 && x < VIEW_W + 20 && y > -20 && y < VIEW_H + 20;
+      if (vis) {
+        lv_obj_set_pos(focusRing, x - 12, VIEW_Y + y - 12);
+        lv_label_set_text(focusLbl, focusName);
+        lv_obj_set_pos(focusLbl, x + 14, VIEW_Y + y - 8);
+        lv_obj_clear_flag(focusRing, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(focusLbl, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_add_flag(focusRing, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(focusLbl, LV_OBJ_FLAG_HIDDEN);
+      }
+    } else {
+      lv_obj_add_flag(focusRing, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(focusLbl, LV_OBJ_FLAG_HIDDEN);
     }
   }
   // other nodes that advertised a position
@@ -303,6 +352,29 @@ void mapview_create(lv_obj_t* parent) {
     markers[i] = { d, n };
   }
 
+  // the focus marker: an amber ring, much more noticeable than the node dots
+  focusRing = lv_obj_create(parent);
+  lv_obj_set_size(focusRing, 24, 24);
+  lv_obj_set_style_radius(focusRing, 12, 0);
+  lv_obj_set_style_bg_opa(focusRing, LV_OPA_20, 0);
+  lv_obj_set_style_bg_color(focusRing, lv_color_hex(ACCENT), 0);
+  lv_obj_set_style_border_width(focusRing, 3, 0);
+  lv_obj_set_style_border_color(focusRing, lv_color_hex(ACCENT), 0);
+  lv_obj_set_style_pad_all(focusRing, 0, 0);
+  lv_obj_clear_flag(focusRing, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(focusRing, LV_OBJ_FLAG_HIDDEN);
+  focusLbl = lv_label_create(parent);
+  lv_label_set_text(focusLbl, "");
+  lv_obj_set_style_text_font(focusLbl, &font_tdos_12, 0);
+  lv_obj_set_style_text_color(focusLbl, lv_color_hex(ACCENT), 0);
+  lv_obj_set_style_bg_color(focusLbl, lv_color_hex(INK), 0);
+  lv_obj_set_style_bg_opa(focusLbl, LV_OPA_80, 0);
+  lv_obj_set_style_pad_hor(focusLbl, 3, 0);
+  lv_obj_set_style_radius(focusLbl, 4, 0);
+  lv_obj_clear_flag(focusLbl, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(focusLbl, LV_OBJ_FLAG_HIDDEN);
+  focusOn = false;
+
   // our own position: a larger blue dot with a white ring
   meDot = lv_obj_create(parent);
   lv_obj_set_size(meDot, 16, 16);
@@ -349,7 +421,7 @@ void mapview_create(lv_obj_t* parent) {
 
 void mapview_destroy() {
   active = false;
-  canvas = nullptr; info = nullptr; hintLbl = nullptr; meDot = nullptr;
+  canvas = nullptr; info = nullptr; hintLbl = nullptr; meDot = nullptr; focusRing = nullptr; focusLbl = nullptr;
   for (auto& m : markers) m = { nullptr, nullptr };
 }
 
@@ -393,6 +465,18 @@ void mapview_zoom(int delta) {
   toWorld(lat, lon, zoom, cx, cy);
   dirty = true;
 }
+
+void mapview_focus(double lat, double lon, const char* name) {
+  focusOn = true;
+  focusLat = lat; focusLon = lon;
+  snprintf(focusName, sizeof(focusName), "%s", name ? name : "");
+  followMe = false;
+  zoom = 14;                                 // street level, and present on the whole region
+  toWorld(lat, lon, zoom, cx, cy);
+  dirty = true;
+  if (canvasBuf) render();
+}
+void mapview_clear_focus() { focusOn = false; dirty = true; }
 
 void mapview_centre_on_me() {
   if (!haveOwn) return;

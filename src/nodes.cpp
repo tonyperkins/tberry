@@ -1,5 +1,6 @@
 #include "nodes.h"
 #include <Arduino.h>
+#include <FS.h>
 
 static NodeInfo table[MAX_NODES];
 static int count = 0;
@@ -50,3 +51,56 @@ const NodeInfo* nodes_sorted(int rank) {
 }
 
 uint32_t nodes_version() { return version; }
+
+bool nodes_position_for_name(const char* name, int32_t* latE6, int32_t* lonE6) {
+  if (!name || !name[0]) return false;
+  const NodeInfo* best = nullptr;
+  for (int i = 0; i < count; i++) {
+    const NodeInfo& n = table[i];
+    if (!n.lat && !n.lon) continue;
+    if (strncmp(n.name, name, sizeof(n.name)) != 0) continue;
+    if (!best || n.lastTs > best->lastTs) best = &n;
+  }
+  if (!best) return false;
+  *latE6 = best->lat; *lonE6 = best->lon;
+  return true;
+}
+
+bool nodes_position_for_key(const uint8_t key4[4], int32_t* latE6, int32_t* lonE6) {
+  for (int i = 0; i < count; i++) {
+    if (memcmp(table[i].key, key4, 4) != 0) continue;
+    if (!table[i].lat && !table[i].lon) return false;
+    *latE6 = table[i].lat; *lonE6 = table[i].lon;
+    return true;
+  }
+  return false;
+}
+
+struct __attribute__((packed)) PosRec { uint8_t key[4]; int32_t lat, lon; };
+
+void nodes_positions_save(fs::FS& fs) {
+  File f = fs.open("/nodepos", "w", true);
+  if (!f) return;
+  for (int i = 0; i < count; i++) {
+    if (!table[i].lat && !table[i].lon) continue;
+    PosRec r;
+    memcpy(r.key, table[i].key, 4);
+    r.lat = table[i].lat; r.lon = table[i].lon;
+    f.write((const uint8_t*)&r, sizeof(r));
+  }
+  f.close();
+}
+
+void nodes_positions_load(fs::FS& fs) {
+  if (!fs.exists("/nodepos")) return;
+  File f = fs.open("/nodepos");
+  if (!f) return;
+  PosRec r;
+  while (f.read((uint8_t*)&r, sizeof(r)) == sizeof(r)) {
+    for (int i = 0; i < count; i++) {
+      if (memcmp(table[i].key, r.key, 4) == 0) { table[i].lat = r.lat; table[i].lon = r.lon; break; }
+    }
+  }
+  f.close();
+  version++;
+}

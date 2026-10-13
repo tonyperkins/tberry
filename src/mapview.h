@@ -13,3 +13,7 @@ void mapview_pan(int dx, int dy);        // by whole screen pixels
 void mapview_zoom(int delta);
 void mapview_centre_on_me();
 bool mapview_active();
+// Show a specific place (for example where a message came from): centred, zoomed in, with its own
+// highlighted marker and name, and the distance and bearing from this device when we have a fix.
+void mapview_focus(double lat, double lon, const char* name);
+void mapview_clear_focus();

@@ -109,6 +109,7 @@ static int sel = 0;                      // 0..5, the highlighted home tile
 static int convSel = 0;                  // highlighted row in the conversation list
 static int convOrder[MAX_CONVS], convN = 0;
 static int curConv = -1;                 // conversation open in the thread view
+static int mapReturnConv = -1;           // conversation to go back to when the map was opened from a message
 static uint32_t shownVersion = 0;
 static char dbgCache[720];
 static int unreadShown = -1;
@@ -206,6 +207,7 @@ static void toast(const char* text);
 static void showHome();
 static void openApp(int i);
 static void openMap();
+static void openMapFocus(double lat, double lon, const char* name);
 static void openNodes();
 static void openStatus();
 static void openConvs();
@@ -272,6 +274,12 @@ static void openSettings();
 static void openAdvanced();
 static void openSignal();
 static void goBack() {
+  if (mode == M_MAP && mapReturnConv >= 0) {          // from a message: back to that conversation
+    int c = mapReturnConv;
+    mapReturnConv = -1;
+    openThread(c);
+    return;
+  }
   if (mode == M_THREAD) { openConvs(); return; }
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
     if (returnTo == M_ADV) openAdvanced();
@@ -456,6 +464,31 @@ static void bubbleTapCb(lv_event_t* e) {
   insertMention(m->sender);
 }
 
+// The position a message's sender advertised, if we know one. Channel messages carry only the
+// sender's name, so those match by name; direct messages are exact, by key.
+static bool messagePosition(const Conv* c, const Msg* m, int32_t* lat, int32_t* lon, char* name, size_t n) {
+  if (m->out) return false;
+  if (c->channel) {
+    if (!m->sender[0] || !nodes_position_for_name(m->sender, lat, lon)) return false;
+    snprintf(name, n, "%s", m->sender);
+    return true;
+  }
+  if (!nodes_position_for_key(c->key, lat, lon)) return false;
+  snprintf(name, n, "%s", c->name);
+  return true;
+}
+static void showOnMapCb(lv_event_t* e) {
+  const Conv* c = msgs_conv(curConv);
+  const Msg* m = msgs_at(curConv, (int)(intptr_t)lv_event_get_user_data(e));
+  int32_t la, lo;
+  char who[40];
+  if (!c || !m || !messagePosition(c, m, &la, &lo, who, sizeof(who))) return;
+  mapReturnConv = curConv;
+  char shown[48];
+  emoji_filter(who, shown, sizeof(shown), false);   // the map's label font has no emoji
+  openMapFocus(la / 1e6, lo / 1e6, shown);
+}
+
 static void buildThread() {
   if (!thrBox) return;
   lv_obj_clean(thrBox);
@@ -556,7 +589,20 @@ static void buildThread() {
     } else {
       snprintf(meta, sizeof(meta), "%s  sending...", when);
     }
-    if (meta[0]) label(row, meta, &font_tdos_12, metaCol);
+    if (meta[0]) {
+      // A crosshair after the line means the sender's position is known: tap it to see where.
+      int32_t la, lo;
+      char who[40];
+      if (!m->out && messagePosition(c, m, &la, &lo, who, sizeof(who))) {
+        strncat(meta, "  " LV_SYMBOL_GPS, sizeof(meta) - strlen(meta) - 1);
+        lv_obj_t* ml = label(row, meta, &font_tdos_12, ACCENT);
+        lv_obj_set_style_pad_all(ml, 5, 0);            // a finger-sized target
+        lv_obj_add_flag(ml, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(ml, showOnMapCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+      } else {
+        label(row, meta, &font_tdos_12, metaCol);
+      }
+    }
   }
   lv_obj_update_layout(thrBox);
   lv_obj_scroll_to_y(thrBox, LV_COORD_MAX, LV_ANIM_OFF);
@@ -1727,7 +1773,11 @@ static void openQuick() {
 }
 
 // ── Map ──────────────────────────────────────────────────────────
+static double pendingFocusLat = 0, pendingFocusLon = 0;
+static char pendingFocusName[40];
+static bool pendingFocus = false;
 static void openMap() {
+  mapReturnConv = -1;
   mode = M_MAP;
   lv_obj_t* s = newScreen();
   mapview_create(s);
@@ -1737,7 +1787,21 @@ static void openMap() {
   lv_obj_set_pos(back, 6, 28);
   lv_obj_center(label(back, LV_SYMBOL_LEFT, &font_tdos_14, TEXT));
   lv_obj_add_event_cb(back, backCb, LV_EVENT_CLICKED, nullptr);
+  if (pendingFocus) {
+    pendingFocus = false;
+    mapview_focus(pendingFocusLat, pendingFocusLon, pendingFocusName);
+  }
   loadApp(s);
+}
+
+// The same screen, opened on a particular place. Back returns to the conversation it came from.
+static void openMapFocus(double lat, double lon, const char* name) {
+  int keep = mapReturnConv;
+  pendingFocus = true;
+  pendingFocusLat = lat; pendingFocusLon = lon;
+  snprintf(pendingFocusName, sizeof(pendingFocusName), "%s", name);
+  openMap();
+  mapReturnConv = keep;                      // openMap() clears it for the ordinary case
 }
 
 // ── building the screens ─────────────────────────────────────────

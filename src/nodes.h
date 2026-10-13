@@ -21,3 +21,13 @@ void nodes_seen(const uint8_t* key4, const char* name, uint8_t type, uint32_t ts
 int nodes_count();
 const NodeInfo* nodes_sorted(int rank);     // rank 0 = heard most recently
 uint32_t nodes_version();
+
+// Where a node says it is (from its adverts). Returns false if unknown. Names are compared exactly,
+// as transmitted; if several nodes share a name the most recently heard one wins.
+bool nodes_position_for_name(const char* name, int32_t* latE6, int32_t* lonE6);
+bool nodes_position_for_key(const uint8_t key4[4], int32_t* latE6, int32_t* lonE6);
+
+// Positions are not part of MeshCore's contact file, so they are kept in a small file of their own.
+#include <FS.h>
+void nodes_positions_save(fs::FS& fs);
+void nodes_positions_load(fs::FS& fs);

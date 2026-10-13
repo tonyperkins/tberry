@@ -330,12 +330,14 @@ public:
       if (c.type == ADV_TYPE_CHAT) msgs_ensure(c.id.pub_key, c.name, false);
       nodes_seen(c.id.pub_key, c.name, c.type, c.last_advert_timestamp, 0, 0, -1);
     }
+    nodes_positions_load(*_fs);              // adverts' positions survive a reboot
   }
 
   // Writing the contact file takes ~0.5 s of flash time, so batch it instead of saving per advert.
   void tick() {
     if (_dirty && millis() - _lastSaveMs > 15000) {
       saveContacts();
+      nodes_positions_save(*_fs);
       _dirty = false;
       _lastSaveMs = millis();
     }
