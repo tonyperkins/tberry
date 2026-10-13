@@ -228,6 +228,25 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
   f.close();
 }
 
+void storage_log_idrow(uint32_t rxTs, uint32_t senderTs, int hops, const uint8_t hash8[8], const char* rawText) {
+  if (!ready) return;
+  bool fresh = !SD.exists("/tdos/idlog.csv");
+  File f = SD.open("/tdos/idlog.csv", FILE_APPEND);
+  if (!f) return;
+  if (f.size() > 3UL * 1024 * 1024) { f.close(); return; }
+  if (fresh) f.println("rx_utc,sender_ts,hops,packet_hash8,raw_text");
+  f.printf("%lu,%lu,%d,", (unsigned long)rxTs, (unsigned long)senderTs, hops);
+  for (int i = 0; i < 8; i++) f.printf("%02x", hash8[i]);
+  f.print(",\"");
+  for (const char* p = rawText; *p; p++) {            // CSV-quote, keep it on one line
+    if (*p == '"') f.print("\"\"");
+    else if (*p == '\n' || *p == '\r') f.print(' ');
+    else f.write((uint8_t)*p);
+  }
+  f.println("\"");
+  f.close();
+}
+
 void storage_tick() {
   if (!ready || qCount == 0) return;
   uint32_t now = millis();

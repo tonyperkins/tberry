@@ -263,6 +263,11 @@ protected:
     }
     char ra[40], re[24], rc[12];
     bool reaction = parseReaction(body, ra, sizeof(ra), re, sizeof(re), rc, sizeof(rc));
+    {                                      // research log for TDOS-008, see storage.h
+      uint8_t h8[MAX_HASH_SIZE];
+      pkt->calculatePacketHash(h8);
+      storage_log_idrow(getRTCClock()->getCurrentTime(), ts, (int)pkt->getPathHashCount(), h8, text);
+    }
     bool mention = !reaction && mentionsMe(text);      // a reaction to us is shown, but does not chime
     if (mention) info.flags |= MF_MENTION;
     msgs_add_info(_pubConv, false, body, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);

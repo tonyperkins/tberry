@@ -535,11 +535,39 @@ static void buildThread() {
   const Conv* c = msgs_conv(curConv);
   if (!c) return;
   int first = max(0, c->count - THREAD_WINDOW);
+
+  // Reactions first: each one is attached to the latest earlier message from the author it names,
+  // which is how other apps resolve them (the 8 character code is not yet understood, TDOS-008).
+  static char badges[THREAD_WINDOW][112];
+  static bool isBadgedReaction[THREAD_WINDOW];
+  memset(badges, 0, sizeof(badges));
+  memset(isBadgedReaction, 0, sizeof(isBadgedReaction));
+  if (c->channel) {
+    for (int r = first; r < c->count; r++) {
+      const Msg* rm = msgs_at(curConv, r);
+      char ra[40], re[24], rc[12];
+      if (!rm || rm->out || !parseReaction(rm->text, ra, sizeof(ra), re, sizeof(re), rc, sizeof(rc))) continue;
+      int target = findParent(curConv, r, ra);
+      if (target < first || target >= c->count) continue;       // not on screen: keep the plain line
+      isBadgedReaction[r - first] = true;
+      char who[40];
+      emoji_filter(rm->sender[0] ? rm->sender : "?", who, sizeof(who), true);
+      char one[80];
+      snprintf(one, sizeof(one), "%s %s", re, who);
+      char* b = badges[target - first];
+      if (strlen(b) + strlen(one) + 4 < sizeof(badges[0])) {
+        if (b[0]) strcat(b, "   ");
+        strcat(b, one);
+      }
+    }
+  }
+
   for (int i = first; i < c->count; i++) {
     const Msg* m = msgs_at(curConv, i);
 
     // A reaction (@[Author]<emoji> <code>) is not a bubble: one quiet line, without the code.
     char rAuthor[40], rEmoji[24], rCode[12];
+    if (c->channel && !m->out && isBadgedReaction[i - first]) continue;   // shown as a badge on its target
     if (c->channel && !m->out && parseReaction(m->text, rAuthor, sizeof(rAuthor), rEmoji, sizeof(rEmoji), rCode, sizeof(rCode))) {
       char raw[160], shown[160];
       const char* who = m->sender[0] ? m->sender : "Someone";
@@ -656,6 +684,12 @@ static void buildThread() {
       metaCol = BAD;
     } else {
       snprintf(meta, sizeof(meta), "%s  sending...", when);
+    }
+    if (badges[i - first][0]) {
+      char shownBadges[120];
+      emoji_filter(badges[i - first], shownBadges, sizeof(shownBadges), true);
+      lv_obj_t* bl = label(row, shownBadges, emoji_font(&font_tdos_12), ACCENT);
+      lv_obj_set_style_max_width(bl, 236, 0);
     }
     if (meta[0]) {
       // A crosshair after the line means the sender's position is known: tap it to see where.

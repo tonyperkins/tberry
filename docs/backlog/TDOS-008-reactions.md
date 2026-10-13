@@ -1,6 +1,6 @@
 # TDOS-008: Recognise reactions
 
-**Type:** feature  **Status:** phase 0 done  **Area:** Messages (thread view), research  **Depends on:** TDOS-007 helpful
+**Type:** feature  **Status:** phases 0 and 1 done; phase 2 waiting on research  **Area:** Messages (thread view), research  **Depends on:** TDOS-007 helpful
 
 ## Why
 Reactions travel as ordinary channel text, so a client that does not understand them shows lines
@@ -36,6 +36,28 @@ small badge on that bubble, with a count when several people reacted.
 
 **Phase 2, sending.** Long-press a message, choose an emoji, send `@[Author]<emoji> <id>`.
 Emoji entry needs a picker backed by the SD emoji pack (the keyboard has no emoji).
+
+## Phase 1 as built
+- A reaction is attached to the **latest earlier message from the author it names** (the same lookup
+  TDOS-007 uses for quotes), and shown as a small amber badge line under that message:
+  `🎉 WRMattil   👍 Greg`. The standalone reaction line is hidden when its target is on screen, and kept
+  when it is not.
+- This is a heuristic. If the author posted several messages since, the badge can land on the wrong
+  one. Resolving the 8 character code would make it exact.
+
+## Research so far
+- Four real reactions were tested against MD5, SHA-1/224/256/384/512, SHA3, BLAKE2, FNV, CRC32 and djb2
+  of the target's text in several forms, taking every plausible slice. **No match.**
+- The four codes decode to 36, 39, 39 and 41 bits as base 36, so they are uniform over 36^8, not 40-bit
+  or 32-bit values. That rules out five bytes of a packet hash and CRC32.
+- The sample did not include the sender timestamps or packet hashes a code might be derived from, so the
+  search needs real logs.
+
+## Data collection (running)
+The firmware writes `/tdos/idlog.csv` on the SD card: for every channel message the receive time, the
+sender's timestamp, hop count, the full 8 byte packet hash and the raw text. When a few reactions have
+been logged, run `python3 tools/find_reaction_id.py idlog.csv`. It tries the derivations against every
+reaction found in the file and prints any that reproduce the code.
 
 ## Research task: how is the id computed?
 Candidates, cheapest to test first:
