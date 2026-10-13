@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 static constexpr uint32_t MAGIC = 0x53444F54;   // "TODS"
-static constexpr uint16_t VERSION = 7;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup
+static constexpr uint16_t VERSION = 8;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off
 static constexpr const char* PATH = "/settings";
 
 static Settings s;
@@ -28,6 +28,7 @@ static void applyDefaults() {
   s.gpsEnabled = 1;
   s.screenTimeout = 1;
   s.setupDone = 0;
+  s.screenOff = 1;
 }
 
 void settings_begin(fs::FS& fs) {
@@ -42,11 +43,12 @@ void settings_begin(fs::FS& fs) {
   size_t got = f.read((uint8_t*)&tmp, sizeof(tmp));
   if (got >= offsetof(Settings, volume) && tmp.magic == MAGIC) {
     // Older files carry zero in the bytes that later became fields, so take the defaults for those.
-    if (tmp.version == 2) { tmp.volume = s.volume; tmp.channelSound = s.channelSound; tmp.gpsEnabled = s.gpsEnabled; tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.version = VERSION; s = tmp; }
-    else if (tmp.version == 3) { tmp.channelSound = s.channelSound; tmp.gpsEnabled = s.gpsEnabled; tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.version = VERSION; s = tmp; }
-    else if (tmp.version == 4) { tmp.gpsEnabled = s.gpsEnabled; tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.version = VERSION; s = tmp; }
-    else if (tmp.version == 5) { tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.version = VERSION; s = tmp; }
-    else if (tmp.version == 6) { tmp.setupDone = 1; tmp.version = VERSION; s = tmp; }
+    if (tmp.version == 2) { tmp.volume = s.volume; tmp.channelSound = s.channelSound; tmp.gpsEnabled = s.gpsEnabled; tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 3) { tmp.channelSound = s.channelSound; tmp.gpsEnabled = s.gpsEnabled; tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 4) { tmp.gpsEnabled = s.gpsEnabled; tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 5) { tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 6) { tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 7) { tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == VERSION) s = tmp;
   }
   f.close();

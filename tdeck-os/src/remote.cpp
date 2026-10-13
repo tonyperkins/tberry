@@ -115,7 +115,7 @@ static void exec(char* s) {
   if (!strcmp(s, "hang")) { while (true) { delay(100); } }                       // test the watchdog (loop never returns)
   if (!strcmp(s, "info")) {
     char b2[96];
-    snprintf(b2, sizeof(b2), "INFO mode=%d lvfree=%u heap=%u last=%s", ui_mode(), (unsigned)ui_lvgl_free(), (unsigned)ESP.getFreeHeap(), diag_reason());
+    snprintf(b2, sizeof(b2), "INFO mode=%d screen=%d lvfree=%u heap=%u last=%s", ui_mode(), ui_screen_state(), (unsigned)ui_lvgl_free(), (unsigned)ESP.getFreeHeap(), diag_reason());
     say(b2);
     return;
   }

@@ -30,6 +30,12 @@ extern TFT_eSPI tft;
 static const uint16_t TIMEOUT_SECONDS[] = { 30, 60, 120, 300, 600, 0 };     // 0 = never
 static const char* const TIMEOUT_NAMES[] = { "30 seconds", "1 minute", "2 minutes", "5 minutes", "10 minutes", "Never" };
 static constexpr int TIMEOUT_N = 6;
+// After the clock has been showing this long, the backlight goes off (touch, key or ball wakes it).
+static const uint16_t SCREENOFF_SECONDS[] = { 15, 30, 60, 300, 0 };         // 0 = never
+static const char* const SCREENOFF_NAMES[] = { "15 seconds", "30 seconds", "1 minute", "5 minutes", "Never" };
+static constexpr int SCREENOFF_N = 5;
+static bool screenOff = false;           // the backlight is off while the clock screen is up
+static uint32_t lockedAtMs = 0;
 static constexpr int PIN_BACKLIGHT = 42;
 
 // ── palette (matches the mockup) ─────────────────────────────────
@@ -287,6 +293,7 @@ static void rememberPlace() {
 
 static void wake() {
   setBacklight(cfg().brightness);
+  screenOff = false;
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
   if (!cfg().setupDone) { openSetup(setupStep); return; }   // first boot, or locked part-way
   Mode m = resumeMode;
@@ -321,6 +328,8 @@ static void goLock() {
   if (old && old == scrApp) { lv_obj_del(old); scrApp = nullptr; }
   releaseApp();
   setBacklight(min<int>(4, cfg().brightness));      // dimmed: about 25 percent
+  lockedAtMs = millis();
+  screenOff = false;
 }
 
 static void showHome() {
@@ -1140,7 +1149,7 @@ static constexpr int ZONE_N = sizeof(zones) / sizeof(zones[0]);
 static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
 static constexpr int BW_N = 10;
 
-enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
+enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
 enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
@@ -1420,6 +1429,11 @@ static void pickChannelSound(int i) {
   settings_changed();
   openSettings();
 }
+static void pickScreenOff(int i) {
+  cfg().screenOff = (uint8_t)constrain(i, 0, SCREENOFF_N - 1);
+  settings_changed();
+  openSettings();
+}
 static void pickTimeout(int i) {
   cfg().screenTimeout = (uint8_t)constrain(i, 0, TIMEOUT_N - 1);
   settings_changed();
@@ -1598,6 +1612,7 @@ static void fillSettings() {
   static const char* const chNames[3] = { "Off", "Mentions only", "All messages" };
   addRow("Channel sounds", chNames[constrain(c.channelSound, 0, 2)], ROW_CHSOUND, K_NAV);
   addRow("Screen timeout", TIMEOUT_NAMES[constrain((int)c.screenTimeout, 0, TIMEOUT_N - 1)], ROW_TIMEOUT, K_NAV);
+  addRow("Screen off", SCREENOFF_NAMES[constrain((int)c.screenOff, 0, SCREENOFF_N - 1)], ROW_SCREENOFF, K_NAV);
   int p = presetIndex();
   addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
   snprintf(b, sizeof(b), "%d%%", lastBatt);
@@ -1781,6 +1796,10 @@ static void settingsAct(int id) {
     case ROW_TIMEOUT:
       for (int i = 0; i < TIMEOUT_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", TIMEOUT_NAMES[i]);
       openPicker("Screen timeout", TIMEOUT_N, constrain((int)c.screenTimeout, 0, TIMEOUT_N - 1), pickTimeout, M_SETTINGS);
+      return;
+    case ROW_SCREENOFF:                        // backlight off after the clock has shown for this long
+      for (int i = 0; i < SCREENOFF_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", SCREENOFF_NAMES[i]);
+      openPicker("Screen off after the clock", SCREENOFF_N, constrain((int)c.screenOff, 0, SCREENOFF_N - 1), pickScreenOff, M_SETTINGS);
       return;
     case ROW_ADV: openPin(); return;
     default: return;                                          // read-only rows
@@ -2665,6 +2684,11 @@ void ui_tick() {
   mapview_tick();
   uint32_t idleS = TIMEOUT_SECONDS[constrain((int)cfg().screenTimeout, 0, TIMEOUT_N - 1)];
   if (idleS && mode != M_LOCK && millis() - lastActivityMs > idleS * 1000UL) goLock();
+  uint32_t offS = SCREENOFF_SECONDS[constrain((int)cfg().screenOff, 0, SCREENOFF_N - 1)];
+  if (mode == M_LOCK && !screenOff && offS && millis() - lockedAtMs > offS * 1000UL) {
+    setBacklight(0);                                  // nobody is looking: the backlight is the biggest draw
+    screenOff = true;
+  }
 }
 
 void ui_update(const UiModel& m) {
@@ -2865,6 +2889,8 @@ void ui_key(char c) {
 
 bool ui_console_active() { return mode == M_DBG; }
 int ui_mode() { return (int)mode; }
+bool ui_screen_off() { return screenOff; }
+int ui_screen_state() { return mode != M_LOCK ? 0 : screenOff ? 2 : 1; }   // 0 on, 1 clock (dim), 2 off
 
 uint32_t ui_lvgl_free() {
   lv_mem_monitor_t mon;

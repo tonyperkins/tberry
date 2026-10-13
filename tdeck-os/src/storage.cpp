@@ -230,6 +230,23 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
   f.close();
 }
 
+// One row every few minutes: lets drain be worked out from the discharge curve without a meter.
+void storage_log_battery(uint32_t uptimeS, uint32_t utc, int mv, int pct, bool usb, int screen, bool gps, uint32_t lvglFree) {
+  if (!ready) return;
+  const char* path = "/tdos/batt.csv";
+  bool fresh = !SD.exists(path);
+  File f = SD.open(path, FILE_APPEND);
+  if (!f) return;
+  if (fresh) f.println("uptime_s,utc,batt_mv,batt_pct,usb,screen,gps,lvgl_free");
+  f.printf("%lu,%lu,%d,%d,%d,%d,%d,%lu\n", (unsigned long)uptimeS, (unsigned long)utc, mv, pct, usb ? 1 : 0, screen, gps ? 1 : 0, (unsigned long)lvglFree);
+  bool big = f.size() > 512 * 1024;
+  f.close();
+  if (big) {
+    SD.remove("/tdos/batt.old");
+    SD.rename(path, "/tdos/batt.old");
+  }
+}
+
 void storage_remove_conv(const uint8_t key[4]) {
   if (!ready) return;
   char path[48];

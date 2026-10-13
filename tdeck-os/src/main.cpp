@@ -951,7 +951,13 @@ void loop() {
     lastDraw = now;
     static UiModel model;
     buildModel(model);
-    ui_update(model);
+    if (!ui_screen_off()) ui_update(model);      // nothing to draw while the backlight is off
+    static uint32_t lastBattLog = 0;             // battery log: first row after a minute, then every 5 minutes
+    if (now > 60000 && (lastBattLog == 0 || now - lastBattLog >= 300000)) {
+      lastBattLog = now;
+      storage_log_battery(now / 1000, model.clockValid ? model.utc : 0, model.batteryMv, model.batteryPct,
+                          model.charging, ui_screen_state(), gpsRunning, ui_lvgl_free());
+    }
   }
   ui_tick();
   if (now - lastLog >= 5000) {
