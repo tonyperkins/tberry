@@ -401,6 +401,7 @@ static SimpleMeshTables tables;
 static DeckMesh* theMesh = nullptr;
 
 static bool radioOk = false, kbOk = false;
+static char i2cFound[96] = "";            // addresses that answered at boot, for diagnosis
 static uint32_t loopMax = 0;          // worst pass since boot
 static uint32_t loopRecent = 0;       // worst pass in the current minute
 static uint32_t loopRecentShown = 0;  // the previous minute's value, which is what the UI reports
@@ -691,6 +692,13 @@ void setup() {
   Wire.setClock(400000);
   Wire.beginTransmission(KB_ADDR);
   kbOk = (Wire.endTransmission(true) == 0);
+  {                                          // which chips are on the I2C bus (touch, keyboard, and any RTC)
+    size_t n = 0;
+    for (uint8_t a = 0x08; a < 0x78 && n + 6 < sizeof(i2cFound); a++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission(true) == 0) n += snprintf(i2cFound + n, sizeof(i2cFound) - n, "0x%02X ", a);
+    }
+  }
 
   SPIFFS.begin(true);
   settings_begin(SPIFFS);
@@ -748,6 +756,7 @@ void loop() {
   ui_tick();
   if (now - lastLog >= 5000) {
     lastLog = now;
+    logf("i2c: %s\n", i2cFound);
     logf("up=%lus contacts=%d loopmax=%lums heap=%u ball U%lu D%lu L%lu R%lu\n", (unsigned long)(now / 1000),
          theMesh ? theMesh->getNumContacts() : 0, (unsigned long)loopMax, (unsigned)ESP.getFreeHeap(),
          (unsigned long)isrUp, (unsigned long)isrDown, (unsigned long)isrLeft, (unsigned long)isrRight);
