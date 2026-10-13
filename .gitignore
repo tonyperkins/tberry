@@ -1,5 +1,6 @@
+meshcoreterm/
 .pio/
 .vscode/
 *.log
-lib/MeshCore
-dist/
+*.bin
+*.elf

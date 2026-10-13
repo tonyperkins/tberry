@@ -1,0 +1,3 @@
+[submodule "tdeck-os/lib/MeshCore"]
+	path = tdeck-os/lib/MeshCore
+	url = https://github.com/meshcore-dev/MeshCore.git
