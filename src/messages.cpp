@@ -2,9 +2,10 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 
-// The UI fonts cover Latin-1, Latin Extended-A and common punctuation (see fonts/fonts.h). Anything
-// else would show as an empty box: emoji and joiners are dropped, other characters become '?',
-// and control characters become spaces.
+// The UI fonts cover Latin-1, Latin Extended-A and common punctuation (see fonts/fonts.h), and emoji
+// are drawn from images on the SD card (emoji.cpp). Anything else would show as an empty box:
+// modifiers and joiners are dropped, other characters become '?', control characters become
+// spaces. Emoji are kept here and filtered at draw time, depending on what the card holds.
 static void cleanText(char* dst, size_t n, const char* src) {
   size_t o = 0;
   for (size_t i = 0; src[i] && o + 1 < n;) {
@@ -19,9 +20,14 @@ static void cleanText(char* dst, size_t n, const char* src) {
     int k = 1;
     for (; k < len && src[i + k]; k++) cp = (cp << 6) | ((uint8_t)src[i + k] & 0x3F);
     i += k;
-    bool emoji = cp >= 0x1F000 || (cp >= 0x2190 && cp <= 0x2BFF) || cp == 0xFE0F || cp == 0x200D || (cp >= 0xE000 && cp <= 0xF8FF);
-    bool drawable = (cp >= 0xA0 && cp <= 0x17F) || (cp >= 0x2010 && cp <= 0x2027) || cp == 0x20AC || cp == 0x2122;
-    if (emoji) continue;
+    // Modifiers and joiners are dropped: skin tones, variation selectors, zero-width joiner, tags.
+    bool modifier = cp == 0xFE0F || cp == 0xFE0E || cp == 0x200D || (cp >= 0x1F3FB && cp <= 0x1F3FF) || (cp >= 0xE0000 && cp <= 0xE007F);
+    bool pua = cp >= 0xE000 && cp <= 0xF8FF;
+    // Emoji are kept; the UI draws them from the SD card when the pack is there and drops them
+    // otherwise (emoji_filter), so a card inserted later still shows old messages' emoji.
+    bool emoji = cp >= 0x1F000 || (cp >= 0x2190 && cp <= 0x2BFF);
+    bool drawable = emoji || (cp >= 0xA0 && cp <= 0x17F) || (cp >= 0x2010 && cp <= 0x2027) || cp == 0x20AC || cp == 0x2122;
+    if (modifier || pua) continue;
     if (drawable && o + len < n) {                 // keep the original UTF-8 bytes
       for (int q = 0; q < k; q++) dst[o++] = src[i - k + q];
     } else {
@@ -34,6 +40,7 @@ static void cleanText(char* dst, size_t n, const char* src) {
 static Conv convs[MAX_CONVS];
 static uint32_t version = 1, nextId = 1;
 static int openConv = -1;
+static const MsgSink* sink = nullptr;     // survives msgs_init(): registered once at boot
 
 void msgs_init() {
   memset(convs, 0, sizeof(convs));
@@ -76,7 +83,8 @@ const Msg* msgs_at(int conv, int i) {
   return &convs[conv].msgs[(convs[conv].start + i) % MSGS_PER_CONV];
 }
 
-uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t status) {
+// Shared by new and loaded messages. id == 0 means "assign the next id".
+static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status, bool loaded) {
   if (conv < 0 || conv >= MAX_CONVS || !convs[conv].used) return 0;
   Conv& c = convs[conv];
   if (!c.msgs) {
@@ -93,25 +101,45 @@ uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t sta
     c.start = (c.start + 1) % MSGS_PER_CONV;
   }
   Msg& m = c.msgs[slot];
-  m.id = nextId++;
+  if (id == 0) id = nextId++;
+  else if (id >= nextId) nextId = id + 1;
+  m.id = id;
   m.ts = ts;
   m.status = status;
   m.out = out;
   cleanText(m.text, sizeof(m.text), text);
-  c.lastTs = ts ? ts : c.lastTs;
-  if (!out && conv != openConv) c.unread++;
+  if (ts > c.lastTs) c.lastTs = ts;
+  if (!loaded) {
+    if (!out && conv != openConv) c.unread++;
+    if (sink && sink->onAdd) sink->onAdd(c.key, m);
+  }
   version++;
   return m.id;
 }
 
-void msgs_set_status(int conv, uint32_t id, uint8_t status) {
+uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t status) {
+  return addInternal(conv, 0, out, text, ts, status, false);
+}
+uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status) {
+  return addInternal(conv, id, out, text, ts, status, true);
+}
+
+static void setStatusInternal(int conv, uint32_t id, uint8_t status, bool loaded) {
   if (conv < 0 || conv >= MAX_CONVS || !convs[conv].used) return;
   Conv& c = convs[conv];
   for (int i = 0; i < c.count; i++) {
     Msg& m = c.msgs[(c.start + i) % MSGS_PER_CONV];
-    if (m.id == id) { m.status = status; version++; return; }
+    if (m.id == id) {
+      m.status = status;
+      version++;
+      if (!loaded && sink && sink->onStatus) sink->onStatus(c.key, id, status);
+      return;
+    }
   }
 }
+void msgs_set_status(int conv, uint32_t id, uint8_t status) { setStatusInternal(conv, id, status, false); }
+void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status) { setStatusInternal(conv, id, status, true); }
+void msgs_set_sink(const MsgSink* s) { sink = s; }
 
 void msgs_mark_read(int conv) {
   if (conv >= 0 && conv < MAX_CONVS && convs[conv].used && convs[conv].unread) { convs[conv].unread = 0; version++; }

@@ -31,5 +31,8 @@
 
 #define LV_USE_THEME_DEFAULT 0        /* all styling is explicit */
 
+#define LV_USE_IMGFONT 1              /* inline emoji images from the SD card */
+#define LV_IMG_CACHE_DEF_SIZE 24     /* small decoded-image cache, so emoji are not re-read per frame */
+
 #endif /*LV_CONF_H*/
 #endif

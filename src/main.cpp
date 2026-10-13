@@ -28,6 +28,7 @@
 #include "ui.h"
 #include "messages.h"
 #include "settings.h"
+#include "storage.h"
 
 #define PUBLIC_GROUP_PSK "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -403,6 +404,8 @@ static void buildModel(UiModel& m) {
   m.signalBars = age < 120 ? 4 : age < 600 ? 3 : age < 3600 ? 2 : age < 10800 ? 1 : 0;
   m.nodesHeard = theMesh ? theMesh->getNumContacts() : 0;
   m.unread = msgs_unread_total();
+  if (storage_ready()) snprintf(m.storage, sizeof(m.storage), "SD, %lu MB free", (unsigned long)storage_free_mb());
+  else snprintf(m.storage, sizeof(m.storage), "No SD card");
   if (theMesh) strncpy(m.nodeName, theMesh->name, sizeof(m.nodeName) - 1);
 
   char* o = m.consoleText;
@@ -467,6 +470,7 @@ void setup() {
   SPIFFS.begin(true);
   settings_begin(SPIFFS);
   msgs_init();
+  storage_begin(TFT_eSPI::getSPIinstance(), PIN_SD_CS);   // message history; fine if no card
   ui_init();
   ui_set_actions(uiActions);
   ui_set_send_handler([](int conv, const char* text) { return theMesh && theMesh->sendConv(conv, text); });
@@ -486,6 +490,7 @@ void setup() {
     RadioNoiseListener noise(radio);
     theMesh->begin(SPIFFS, noise);
     applyRadioFromSettings();
+    storage_load_messages();            // conversations now exist: restore their history
     theMesh->advertise(1200);
     chatPush("%s ready, advert sent", theMesh->name);
   } else {
@@ -499,6 +504,7 @@ void loop() {
 
   if (theMesh) { theMesh->loop(); theMesh->tick(); }
   settings_tick();
+  storage_tick();
   rtc.tick();
   pollGps();
   pollKeyboard();

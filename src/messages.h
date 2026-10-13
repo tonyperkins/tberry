@@ -41,4 +41,16 @@ void msgs_mark_read(int conv);
 void msgs_set_open(int conv);                                         // the conversation on screen, or -1
 int msgs_unread_total();
 int msgs_sorted(int* out, int max);                                   // channel first, then newest activity
-uint32_t msgs_version();                                              // changes whenever anything does
+uint32_t msgs_version();
+
+// Storage hooks. The store itself knows nothing about SD cards: whoever persists messages
+// registers a sink and is told about every new message and every status change.
+struct MsgSink {
+  void (*onAdd)(const uint8_t key[4], const Msg& m);
+  void (*onStatus)(const uint8_t key[4], uint32_t id, uint8_t status);
+};
+void msgs_set_sink(const MsgSink* sink);
+// Insert a message read back from storage: keeps its id, is never unread, and is not re-saved.
+uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status);
+void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status);   // same, for a status record
+                                              // changes whenever anything does

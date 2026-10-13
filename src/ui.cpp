@@ -13,6 +13,7 @@
 #include "messages.h"
 #include "settings.h"
 #include "fonts/fonts.h"
+#include "emoji.h"
 
 extern TFT_eSPI tft;
 
@@ -86,6 +87,7 @@ static int pinLen = 0, pinStage = 0;     // 0 enter, 1 choose, 2 confirm
 static bool resetArmed = false;
 static int lastBatt = 0;
 static char lastName[32];
+static char lastStorage[32];
 static UiActions actions = {};
 static int sel = 0;                      // 0..5, the highlighted home tile
 static int convSel = 0;                  // highlighted row in the conversation list
@@ -320,12 +322,16 @@ static void fillConvs() {
     char ini[2] = { c->channel ? '#' : (char)toupper((unsigned char)c->name[0]), 0 };
     lv_obj_t* il = label(av, ini[0] ? ini : "?", &font_tdos_14, INK);
     lv_obj_center(il);
-    lv_obj_t* n = label(row, c->name[0] ? c->name : "(unnamed)", &font_tdos_14, TEXT);
+    char nm[48];
+    emoji_filter(c->name, nm, sizeof(nm), true);
+    lv_obj_t* n = label(row, nm[0] ? nm : "(unnamed)", emoji_font(&font_tdos_14), TEXT);
     lv_obj_set_pos(n, 46, 5);
     lv_obj_set_width(n, 190);
     lv_label_set_long_mode(n, LV_LABEL_LONG_CLIP);
     const Msg* last = c->count ? msgs_at(convOrder[r], c->count - 1) : nullptr;
-    lv_obj_t* p = label(row, last ? last->text : "No messages yet", &font_tdos_12, MUTE);
+    char pv[200] = "No messages yet";
+    if (last) emoji_filter(last->text, pv, sizeof(pv), true);
+    lv_obj_t* p = label(row, pv, emoji_font(&font_tdos_12), MUTE);
     lv_obj_set_pos(p, 46, 25);
     lv_obj_set_width(p, 200);
     lv_label_set_long_mode(p, LV_LABEL_LONG_CLIP);
@@ -390,7 +396,9 @@ static void buildThread() {
     lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
 
-    lv_obj_t* t = label(b, m->text, &font_tdos_14, m->out ? 0x06101F : TEXT);
+    char shown[200];
+    emoji_filter(m->text, shown, sizeof(shown), true);
+    lv_obj_t* t = label(b, shown, emoji_font(&font_tdos_14), m->out ? 0x06101F : TEXT);
     // A content-sized label never wraps by itself: measure it, and if it is too wide give it a
     // fixed width so LVGL wraps it onto more lines.
     lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
@@ -428,7 +436,9 @@ static void openThread(int conv) {
   msgs_mark_read(conv);
 
   lv_obj_t* s = newScreen();
-  headerFor(s, c->name[0] ? c->name : "(unnamed)");
+  char title[48];
+  emoji_filter(c->name, title, sizeof(title), false);
+  headerFor(s, title[0] ? title : "(unnamed)");
 
   thrBox = lv_obj_create(s);
   lv_obj_set_size(thrBox, 320, 240 - 58 - 60);
@@ -832,6 +842,7 @@ static void fillSettings() {
   addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
   snprintf(b, sizeof(b), "%d%%", lastBatt);
   addRow("Battery", b, ROW_BATT, K_INFO);
+  addRow("History", lastStorage, ROW_ABOUT, K_INFO);
   addRow("About", "tdeck-os 0.1", ROW_ABOUT, K_INFO);
   addRow("Advanced", "", ROW_ADV, K_NAV);
   if (listKind[listSel] == K_INFO) listSel = nextSelectable(listSel, 1);
@@ -1160,6 +1171,7 @@ void ui_init() {
   touchDrv.type = LV_INDEV_TYPE_POINTER;
   touchDrv.read_cb = touchRead;
   lv_indev_drv_register(&touchDrv);
+  emoji_init();                        // inline emoji from the SD card, if the pack is there
 
   buildStatusBar();
   buildLock();
@@ -1208,6 +1220,7 @@ void ui_update(const UiModel& m) {
 
   lastBatt = m.batteryPct;
   strncpy(lastName, m.nodeName, sizeof(lastName) - 1);
+  strncpy(lastStorage, m.storage, sizeof(lastStorage) - 1);
 
   if (m.unread != unreadShown) {
     unreadShown = m.unread;
@@ -1228,9 +1241,13 @@ void ui_update(const UiModel& m) {
     else if (mode == M_THREAD) { msgs_mark_read(curConv); buildThread(); shownVersion = msgs_version(); }
   }
 
-  if (mode == M_DBG && dbgLabel && strcmp(dbgCache, m.consoleText) != 0) {
-    strncpy(dbgCache, m.consoleText, sizeof(dbgCache) - 1);
-    lv_label_set_text(dbgLabel, dbgCache);
+  if (mode == M_DBG && dbgLabel) {
+    static char flat[720];
+    emoji_filter(m.consoleText, flat, sizeof(flat), false);
+    if (strcmp(dbgCache, flat) != 0) {
+      strncpy(dbgCache, flat, sizeof(dbgCache) - 1);
+      lv_label_set_text(dbgLabel, dbgCache);
+    }
   }
 }
 

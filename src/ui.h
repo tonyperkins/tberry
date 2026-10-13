@@ -12,6 +12,7 @@ struct UiModel {
   int nodesHeard = 0;
   int unread = 0;            // unread messages across all conversations
   char nodeName[32] = {0};   // this node's name on the mesh
+  char storage[32] = {0};    // where history is kept, for the Settings screen
   char consoleText[720] = {0};   // text shown by the debug console
 };
 
