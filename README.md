@@ -14,7 +14,8 @@ parameters, PIN-protected) still reachable.
 - **Messages**: direct messages with delivery ticks and round-trip time, and channels (the Public
   channel is preconfigured). Replies use the `@[Name]` convention; tap a message to reply, hold it for
   details. Quoted parents, reactions shown as badges, mentions of you highlighted. The message box has
-  an emoji picker and a button to clear the text; emoji are drawn from the SD card.
+  an emoji picker and a button to clear the text; emoji are drawn from the SD card. Hashtag channels
+  (`#test`, `#austin`, ...) can be joined with the **+** button and left from their thread.
 - **Message details**: route, hop count, SNR and RSSI, the repeater path (named when unambiguous),
   clock difference, airtime, how many copies were heard.
 - **Signal**: one-tap range test to a contact (round trip, hops, RSSI, SNR), logged to the SD card.

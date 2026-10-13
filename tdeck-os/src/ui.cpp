@@ -371,6 +371,7 @@ static void goBack() {
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
     if (returnTo == M_ADV) openAdvanced();
     else if (returnTo == M_SIGNAL) openSignal();
+    else if (returnTo == M_CONVS) openConvs();
     else openSettings();
     return;
   }
@@ -480,12 +481,31 @@ static void fillConvs() {
   }
 }
 
+// Joining a hashtag channel: a name box, then straight into the conversation.
+static bool joinChannelEntry(const char* typed) {
+  int r = actions.joinChannel ? actions.joinChannel(typed) : -1;
+  if (r == -1) { toast("Use letters, numbers and dashes"); return false; }
+  if (r == -2) { toast("No room for more channels"); return false; }
+  openThread(r);
+  toast("Joined");
+  return true;
+}
+static void openEntry(const char* title, const char* hint, const char* initial, int maxLen, bool numeric,
+                      bool (*cb)(const char*), Mode ret);
+static void joinCb(lv_event_t*) {
+  openEntry("Join channel", "A topic name, like test or austin. It joins #test.", "", 31, false, joinChannelEntry, M_CONVS);
+}
+
 static void openConvs() {
   mode = M_CONVS;
   curConv = -1;
   msgs_set_open(-1);
   lv_obj_t* s = newScreen();
   headerFor(s, "Messages");
+  lv_obj_t* join = tappable(box(s, 40, 28, RAISE, 10));
+  lv_obj_set_pos(join, 274, 26);
+  lv_obj_center(label(join, LV_SYMBOL_PLUS, &font_tdos_14, ACCENT));
+  lv_obj_add_event_cb(join, joinCb, LV_EVENT_CLICKED, nullptr);
   convBox = lv_obj_create(s);
   lv_obj_set_size(convBox, 320, 240 - 58);
   lv_obj_set_pos(convBox, 0, 58);
@@ -957,6 +977,22 @@ static void doSend() {
 }
 static void sendCb(lv_event_t*) { doSend(); }
 
+static bool leaveArmed = false;
+static lv_obj_t* leaveLbl = nullptr;
+static void leaveCb(lv_event_t*) {
+  if (!leaveArmed) {                            // first tap asks, second tap leaves
+    leaveArmed = true;
+    if (leaveLbl) { lv_label_set_text(leaveLbl, "Sure?"); lv_obj_set_style_text_color(leaveLbl, C(BAD), 0); lv_obj_center(leaveLbl); }
+    return;
+  }
+  int conv = curConv;
+  leaveArmed = false;
+  if (conv >= 0 && actions.leaveChannel) actions.leaveChannel(conv);
+  curConv = -1;
+  openConvs();
+  toast("Left the channel");
+}
+
 static void openThread(int conv) {
   const Conv* c = msgs_conv(conv);
   if (!c) return;
@@ -969,6 +1005,14 @@ static void openThread(int conv) {
   char title[48];
   emoji_filter(c->name, title, sizeof(title), false);
   headerFor(s, title[0] ? title : "(unnamed)");
+  leaveArmed = false;
+  if (c->channel && memcmp(c->key, CHANNEL_KEY, 4) != 0) {           // hashtag channels can be left
+    lv_obj_t* lv = tappable(box(s, 64, 28, RAISE, 10));
+    lv_obj_set_pos(lv, 250, 26);
+    leaveLbl = label(lv, "Leave", &font_tdos_12, MUTE);
+    lv_obj_center(leaveLbl);
+    lv_obj_add_event_cb(lv, leaveCb, LV_EVENT_CLICKED, nullptr);
+  }
 
   thrBox = lv_obj_create(s);
   lv_obj_set_size(thrBox, 320, 240 - 58 - 60);

@@ -8,6 +8,7 @@ bool storage_begin(SPIClass& spi, int csPin);   // mounts the card and registers
 bool storage_ready();                           // a card is mounted and usable
 uint32_t storage_free_mb();
 void storage_load_messages();                   // after the conversations exist
+void storage_remove_conv(const uint8_t key[4]);   // delete a conversation's history file
 void storage_log_boot(const char* line);   // one line per start to /tdos/boot.log
 void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, int hops, int rssi, float snr);
 // Research for TDOS-008: one CSV line per channel message with the fields a reaction code might be

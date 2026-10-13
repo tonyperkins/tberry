@@ -230,6 +230,13 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
   f.close();
 }
 
+void storage_remove_conv(const uint8_t key[4]) {
+  if (!ready) return;
+  char path[48];
+  pathFor(key, path, sizeof(path));
+  SD.remove(path);
+}
+
 void storage_log_boot(const char* text) {
   if (!ready || !text || !text[0]) return;
   File f = SD.open("/tdos/boot.log", FILE_APPEND);

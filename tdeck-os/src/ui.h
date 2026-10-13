@@ -57,5 +57,7 @@ struct UiActions {
   void (*setName)(const char* name);       // rename the node and re-advertise
   void (*advertise)();                     // send an advert now
   bool (*sendTest)(int conv);              // send a range-test message into a conversation
+  int (*joinChannel)(const char* name);    // join a hashtag channel: conversation index, -1 bad name, -2 no room
+  void (*leaveChannel)(int conv);          // leave a hashtag channel and forget its messages
 };
 void ui_set_actions(const UiActions& a);

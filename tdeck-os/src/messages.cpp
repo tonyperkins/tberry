@@ -77,6 +77,14 @@ int msgs_ensure(const uint8_t key[4], const char* name, bool channel) {
   return i;
 }
 
+void msgs_remove(int conv) {
+  if (conv < 0 || conv >= MAX_CONVS || !convs[conv].used) return;
+  if (convs[conv].msgs) { free(convs[conv].msgs); }
+  memset(&convs[conv], 0, sizeof(Conv));
+  if (openConv == conv) openConv = -1;
+  version++;
+}
+
 const Conv* msgs_conv(int idx) { return (idx >= 0 && idx < MAX_CONVS && convs[idx].used) ? &convs[idx] : nullptr; }
 
 const Msg* msgs_at(int conv, int i) {

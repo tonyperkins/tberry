@@ -70,6 +70,7 @@ struct Conv {
 void msgs_init();
 int msgs_find(const uint8_t key[4]);                                  // conversation index or -1
 int msgs_ensure(const uint8_t key[4], const char* name, bool channel);
+void msgs_remove(int conv);                                           // forget a conversation and its messages
 const Conv* msgs_conv(int idx);
 const Msg* msgs_at(int conv, int i);                                  // i = 0 is the oldest
 uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t status);   // returns the id

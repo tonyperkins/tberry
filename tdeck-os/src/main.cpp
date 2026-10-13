@@ -112,6 +112,11 @@ class DeckMesh : public BaseChatMesh {
   Pending _pending[MAX_PENDING] = {};
   int _pubConv = -1;
   ChannelDetails* _public = nullptr;
+  // Hashtag channels the owner has joined (channel slot 0 is Public). The key comes from the name:
+  // the first 16 bytes of sha256("#name"), so anyone using the same name shares it.
+  struct HashChan { bool used; char name[32]; uint8_t secret[16]; uint8_t key[4]; int conv; int slot; mesh::GroupChannel gc; };
+  static constexpr int MAX_HASH = MAX_GROUP_CHANNELS - 1;
+  HashChan _hc[MAX_HASH] = {};
   bool _dirty = false;
   uint32_t _lastSaveMs = 0;
 
@@ -253,7 +258,12 @@ protected:
   }
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onSignedMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const uint8_t*, const char*) override {}
-  void onChannelMessageRecv(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t ts, const char* text) override {
+  // Which conversation a channel's messages belong to.
+  int convForChannel(const mesh::GroupChannel& ch) const {
+    for (const auto& h : _hc) if (h.used && memcmp(h.secret, ch.secret, 16) == 0) return h.conv;
+    return _pubConv;
+  }
+  void onChannelMessageRecv(const mesh::GroupChannel& ch, mesh::Packet* pkt, uint32_t ts, const char* text) override {
     lastHeardMs = millis();
     // Channel text arrives as "Sender: body". Keep the sender exactly as sent so a reply can mention
     // them byte for byte, and store the body on its own.
@@ -274,7 +284,7 @@ protected:
     }
     bool mention = !reaction && mentionsMe(text);      // a reaction to us is shown, but does not chime
     if (mention) info.flags |= MF_MENTION;
-    msgs_add_info(_pubConv, false, body, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
+    msgs_add_info(convForChannel(ch), false, body, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
     // The channel is silent unless the owner asked for more (TDOS-006).
     uint8_t policy = cfg().channelSound;
     if (!reaction && (policy == 2 || (policy == 1 && mention))) audio_play(SND_RECEIVE);
@@ -346,8 +356,9 @@ public:
     loadContacts();
     _public = addChannel("Public", PUBLIC_GROUP_PSK);
 
-    // Conversations: the Public channel, then every person we already know.
+    // Conversations: the Public channel, the hashtag channels joined earlier, then every person we know.
     _pubConv = msgs_ensure(CHANNEL_KEY, "Public", true);
+    loadHashChannels();
     ContactsIterator iter = startContactsIterator();
     ContactInfo c;
     while (iter.hasNext(this, c)) {
@@ -355,6 +366,88 @@ public:
       nodes_seen(c.id.pub_key, c.name, c.type, c.last_advert_timestamp, 0, 0, -1);
     }
     nodes_positions_load(*_fs);              // adverts' positions survive a reboot
+  }
+
+  // ── Hashtag channels ──
+  // "Test", "#test" and " #TEST " are the same channel. Letters, digits and dashes only.
+  static bool hashtagName(const char* typed, char* out, size_t n) {
+    size_t o = 0;
+    if (n < 3) return false;
+    out[o++] = '#';
+    for (const char* p = typed; *p && o + 1 < n; p++) {
+      char c = *p;
+      if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+      if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') out[o++] = c;
+      else if (c == '#' || c == ' ') continue;
+      else return false;
+    }
+    out[o] = 0;
+    return o > 1;
+  }
+  void saveHashChannels() {
+    if (!_fs) return;
+    File f = _fs->open("/hashchans", "w", true);
+    if (!f) return;
+    for (const auto& h : _hc) if (h.used) { f.print(h.name); f.print('\n'); }
+    f.close();
+  }
+  // Returns the conversation index, -1 for a bad name, -2 when all slots are taken.
+  int addHashChannel(const char* typed, bool save) {
+    char nm[32];
+    if (!hashtagName(typed, nm, sizeof(nm))) return -1;
+    uint8_t digest[32];
+    mesh::Utils::sha256(digest, sizeof(digest), (const uint8_t*)nm, (int)strlen(nm));
+    for (const auto& h : _hc) if (h.used && memcmp(h.secret, digest, 16) == 0) return h.conv;   // already joined
+    int free = -1;
+    for (int i = 0; i < MAX_HASH; i++) if (!_hc[i].used) { free = i; break; }
+    if (free < 0) return -2;
+    HashChan& h = _hc[free];
+    h = {};
+    h.used = true;
+    snprintf(h.name, sizeof(h.name), "%s", nm);
+    memcpy(h.secret, digest, 16);
+    memcpy(h.key, digest, 4);
+    h.slot = free + 1;
+    ChannelDetails d = {};
+    memcpy(d.channel.secret, h.secret, 16);
+    snprintf(d.name, sizeof(d.name), "%s", nm);
+    if (!setChannel(h.slot, d)) { h.used = false; return -2; }
+    ChannelDetails back;
+    if (getChannel(h.slot, back)) h.gc = back.channel;
+    h.conv = msgs_ensure(h.key, nm, true);
+    if (h.conv < 0) { h.used = false; return -2; }
+    if (save) saveHashChannels();
+    return h.conv;
+  }
+  void loadHashChannels() {
+    if (!_fs || !_fs->exists("/hashchans")) return;
+    File f = _fs->open("/hashchans");
+    if (!f) return;
+    char line[40];
+    int n = 0;
+    while (f.available()) {
+      char c = (char)f.read();
+      if (c == '\n' || n >= (int)sizeof(line) - 1) {
+        line[n] = 0;
+        if (n > 0) addHashChannel(line, false);
+        n = 0;
+      } else if (c != '\r') {
+        line[n++] = c;
+      }
+    }
+    f.close();
+  }
+  void leaveChannel(int conv) {
+    for (auto& h : _hc) {
+      if (!h.used || h.conv != conv) continue;
+      ChannelDetails blank = {};
+      setChannel(h.slot, blank);
+      storage_remove_conv(h.key);
+      msgs_remove(h.conv);
+      h.used = false;
+      saveHashChannels();
+      return;
+    }
   }
 
   // Writing the contact file takes ~0.5 s of flash time, so batch it instead of saving per advert.
@@ -405,7 +498,9 @@ public:
     uint32_t id = msgs_add(conv, true, text, now, MS_SENDING);
 
     if (c->channel) {
-      bool ok = sendGroupMessage(now, _public->channel, name, text, strlen(text));
+      mesh::GroupChannel* gc = &_public->channel;
+      for (auto& h : _hc) if (h.used && h.conv == conv) gc = &h.gc;
+      bool ok = sendGroupMessage(now, *gc, name, text, strlen(text));
       msgs_set_status(conv, id, ok ? MS_SENT : MS_FAILED);   // channels have no per-message ACK
       return ok;
     }
@@ -756,6 +851,8 @@ static const UiActions uiActions = {
   },
   /* advertise  */ []() { if (theMesh) { theMesh->advertise(0); chatPush("(advert sent)"); } },
   /* sendTest   */ [](int conv) { return theMesh && theMesh->sendTest(conv); },
+  /* joinChannel  */ [](const char* name) { return theMesh ? theMesh->addHashChannel(name, true) : -1; },
+  /* leaveChannel */ [](int conv) { if (theMesh) theMesh->leaveChannel(conv); },
 };
 
 void setup() {
