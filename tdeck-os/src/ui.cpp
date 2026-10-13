@@ -752,8 +752,9 @@ static void openThread(int conv) {
   lv_obj_set_style_bg_color(taInput, C(RAISE), 0);
   lv_obj_set_style_bg_opa(taInput, LV_OPA_COVER, 0);
   lv_obj_set_style_text_color(taInput, C(TEXT), 0);
-  lv_obj_set_style_text_font(taInput, &font_tdos_16, 0);
-  lv_obj_set_style_pad_hor(taInput, 10, 0);
+  lv_obj_set_style_text_font(taInput, emoji_font(&font_tdos_16), 0);
+  lv_obj_set_style_pad_left(taInput, 10, 0);
+  lv_obj_set_style_pad_right(taInput, 30, 0);   // room for the clear button
   lv_obj_set_style_pad_ver(taInput, 6, 0);
   lv_obj_set_style_border_color(taInput, C(LINE), 0);
   lv_obj_set_style_border_width(taInput, 1, 0);
@@ -776,6 +777,20 @@ static void openThread(int conv) {
   lv_obj_t* sl = label(send, LV_SYMBOL_RIGHT, &font_tdos_20, INK);
   lv_obj_center(sl);
   lv_obj_add_event_cb(send, sendCb, LV_EVENT_CLICKED, nullptr);
+
+  // Clear button inside the right edge of the box, shown only when there is text.
+  lv_obj_t* clr = tappable(box(s, 28, 28, RAISE2, 14));
+  lv_obj_set_pos(clr, 6 + 250 - 32, 240 - 56 + 12);
+  lv_obj_center(label(clr, LV_SYMBOL_CLOSE, &font_tdos_14, MUTE));
+  lv_obj_add_flag(clr, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_event_cb(clr, [](lv_event_t* e) {
+    if (taInput) lv_textarea_set_text(taInput, "");
+  }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(taInput, [](lv_event_t* e) {
+    lv_obj_t* b = (lv_obj_t*)lv_event_get_user_data(e);
+    const char* t = lv_textarea_get_text(lv_event_get_target(e));
+    if (t && *t) lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+  }, LV_EVENT_VALUE_CHANGED, clr);
 
   buildThread();
   shownVersion = msgs_version();
