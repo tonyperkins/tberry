@@ -367,6 +367,8 @@ static bool gpsFix = false;
 static uint32_t gpsFixMs = 0;
 static int32_t gpsLatE6 = 0, gpsLonE6 = 0;      // last position, micro-degrees
 static uint32_t gpsByteMs = 0;                   // when the module last sent anything at all
+static bool gpsPosValid = false;                 // a trustworthy position (see evalGpsValidity)
+static uint32_t gpsPosMs = 0;                    // when it was last confirmed
 // What the GPS module has told us beyond the position, for the Status screen.
 struct GpsInfo {
   uint8_t fixType = 0;            // from GSA: 1 none, 2 = 2D, 3 = 3D
@@ -375,6 +377,7 @@ struct GpsInfo {
   float hdop = 0, altM = 0, speedKmh = 0, courseDeg = 0;
   struct { char talker[3]; uint8_t inView; uint32_t ms; } view[6] = {};   // one slot per constellation
 } gpsInfo;
+static float speedHist[3] = {0, 0, 0};           // last three speed readings, for smoothing
 
 static uint8_t satsInView() {
   uint32_t now = millis();
@@ -387,6 +390,23 @@ static double nmeaDegrees(const char* s, char hemi) {
   double v = atof(s);
   double d = floor(v / 100.0) + fmod(v, 100.0) / 60.0;
   return (hemi == 'S' || hemi == 'W') ? -d : d;
+}
+
+// A position is only trusted when the module says it has a fix (GGA quality), is using enough
+// satellites, and reports a 2D or 3D solution (GSA). RMC "A" on its own is not enough: modules keep
+// sending it for a while after the sky view is lost.
+static void evalGpsValidity() {
+  bool valid = gpsFix && gpsInfo.quality > 0 && gpsInfo.satsUsed >= 3 && gpsInfo.fixType >= 2;
+  if (valid && !gpsPosValid) audio_play(SND_GPS_LOCK);
+  gpsPosValid = valid;
+  if (valid) {
+    gpsPosMs = millis();
+  } else {                                       // do not leave stale numbers on the screen
+    gpsInfo.speedKmh = 0;
+    gpsInfo.courseDeg = 0;
+    gpsInfo.altM = 0;
+    for (auto& v : speedHist) v = 0;
+  }
 }
 
 // One complete sentence, e.g. "$GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,,,A*6A".
@@ -416,22 +436,28 @@ static void handleNmea(char* line, int n) {
       gpsLatE6 = (int32_t)lround(nmeaDegrees(f[3], f[4][0]) * 1e6);
       gpsLonE6 = (int32_t)lround(nmeaDegrees(f[5], f[6][0]) * 1e6);
     }
-    gpsInfo.speedKmh = (float)(num(7) * 1.852);   // knots -> km/h
+    // Speed over ground comes from Doppler and wanders by several km/h when few satellites are in
+    // use, so average the last three readings.
+    speedHist[2] = speedHist[1]; speedHist[1] = speedHist[0];
+    speedHist[0] = (float)(num(7) * 1.852);       // knots -> km/h
+    gpsInfo.speedKmh = (speedHist[0] + speedHist[1] + speedHist[2]) / 3.0f;
     gpsInfo.courseDeg = (float)num(8);
     if (epoch > 1700000000L) {
-      if (!gpsFix) audio_play(SND_GPS_LOCK);
       gpsFix = true;
       gpsFixMs = millis();
       int32_t diff = (int32_t)(epoch - (time_t)rtc.getCurrentTime());
       if (diff > 2 || diff < -2) rtc.setCurrentTime((uint32_t)epoch);
     }
+    evalGpsValidity();
   } else if (memcmp(type, "GGA", 3) == 0) {
     gpsInfo.quality = (uint8_t)num(6);
     gpsInfo.satsUsed = (uint8_t)num(7);
     gpsInfo.hdop = (float)num(8);
     gpsInfo.altM = (float)num(9);
+    evalGpsValidity();
   } else if (memcmp(type, "GSA", 3) == 0) {
     gpsInfo.fixType = (uint8_t)num(2);
+    evalGpsValidity();
   } else if (memcmp(type, "GSV", 3) == 0) {
     // field 3 is the number of satellites in view for this constellation (the talker id)
     const char* talker = line + 1;
@@ -463,9 +489,10 @@ static void pollGps() {
       line[n++] = c;
     }
   }
-  if (gpsFix && millis() - gpsFixMs > 30000) {
+  if (gpsFix && millis() - gpsFixMs > 10000) {   // no valid RMC for ten seconds: lost
     gpsFix = false;
     gpsInfo.fixType = 0;
+    evalGpsValidity();
   }
 }
 
@@ -545,16 +572,16 @@ static void buildModel(UiModel& m) {
   m.psramKb = ESP.getFreePsram() / 1024;
   m.timeSource = gpsFix ? 2 : (m.clockValid ? 1 : 0);
   m.sdReady = storage_ready();
-  m.hasPos = gpsFix && (gpsLatE6 || gpsLonE6);
-  m.gpsState = gpsFix ? 2 : (gpsByteMs && millis() - gpsByteMs < 5000 ? 1 : 0);
-  m.gpsFixType = gpsInfo.fixType;
+  m.hasPos = gpsPosValid && (gpsLatE6 || gpsLonE6);
+  m.gpsState = gpsPosValid ? 2 : (gpsByteMs && millis() - gpsByteMs < 5000 ? 1 : 0);
+  m.gpsFixType = gpsPosValid ? gpsInfo.fixType : 0;
   m.gpsSatsUsed = gpsInfo.satsUsed;
   m.gpsSatsView = satsInView();
   m.gpsHdop = gpsInfo.hdop;
   m.gpsAltM = gpsInfo.altM;
   m.gpsSpeedKmh = gpsInfo.speedKmh;
   m.gpsCourse = gpsInfo.courseDeg;
-  m.gpsFixAgeSec = gpsFixMs ? (millis() - gpsFixMs) / 1000 : 0;
+  m.gpsFixAgeSec = gpsPosMs ? (millis() - gpsPosMs) / 1000 : 0;
   m.latE6 = gpsLatE6;
   m.lonE6 = gpsLonE6;
   m.sdFreeMb = storage_free_mb();

@@ -1390,8 +1390,8 @@ static void refreshStatus() {
   }
 
   // GPS section
-  const char* fix = m.gpsFixType >= 3 ? "3D fix" : m.gpsFixType == 2 ? "2D fix"
-                  : m.gpsState == 2 ? "Fix" : m.gpsState == 1 ? "Searching" : "No data";
+  const char* fix = m.gpsState != 2 ? (m.gpsState == 1 ? "Searching" : "No data")
+                  : m.gpsFixType >= 3 ? "3D fix" : "2D fix";
   if (m.gpsState == 2) snprintf(c, sizeof(c), "updated %us ago", (unsigned)m.gpsFixAgeSec);
   else snprintf(c, sizeof(c), m.gpsState == 1 ? "looking for satellites" : "module is silent");
   lv_label_set_text(stVal[6], fix); lv_label_set_text(stSub[6], c);
@@ -1401,7 +1401,8 @@ static void refreshStatus() {
   snprintf(c, sizeof(c), "%u in view", (unsigned)m.gpsSatsView);
   lv_label_set_text(stVal[7], b); lv_label_set_text(stSub[7], c);
 
-  if (m.gpsHdop > 0) {
+  // 99.99 and 100 are the module's "no estimate" values, not measurements
+  if (m.gpsState == 2 && m.gpsHdop > 0 && m.gpsHdop < 50) {
     snprintf(b, sizeof(b), "HDOP %.1f", m.gpsHdop);
     const char* q = m.gpsHdop < 1.0f ? "excellent" : m.gpsHdop < 2.0f ? "good" : m.gpsHdop < 5.0f ? "moderate" : "poor";
     snprintf(c, sizeof(c), "%s, about %d m", q, (int)lroundf(m.gpsHdop * 5.0f));
@@ -1410,17 +1411,24 @@ static void refreshStatus() {
   }
   lv_label_set_text(stVal[8], b); lv_label_set_text(stSub[8], c);
 
-  if (m.gpsState == 2) {
+  // Vertical error is typically two to three times the horizontal error, and a 2D fix has none.
+  if (m.gpsState == 2 && m.gpsFixType >= 3) {
     snprintf(b, sizeof(b), "%.0f m", m.gpsAltM);
-    snprintf(c, sizeof(c), "%.0f ft", m.gpsAltM * 3.28084f);
+    snprintf(c, sizeof(c), "%.0f ft, rough", m.gpsAltM * 3.28084f);
   } else { snprintf(b, sizeof(b), "-"); c[0] = 0; }
   lv_label_set_text(stVal[9], b); lv_label_set_text(stSub[9], c);
 
-  if (m.gpsState == 2) {
-    snprintf(b, sizeof(b), "%.1f km/h", m.gpsSpeedKmh);
-    if (m.gpsSpeedKmh > 2.0f) snprintf(c, sizeof(c), "heading %d deg", (int)lroundf(m.gpsCourse));
-    else snprintf(c, sizeof(c), "stationary");
-  } else { snprintf(b, sizeof(b), "-"); c[0] = 0; }
+  // Below about 4 km/h a GPS cannot tell walking from sitting still, so call that stationary.
+  // And with poor geometry (HDOP 5 or more) the figure is not worth showing at all.
+  if (m.gpsState == 2 && m.gpsFixType >= 3 && m.gpsHdop > 0 && m.gpsHdop < 5.0f) {
+    if (m.gpsSpeedKmh >= 4.0f) {
+      snprintf(b, sizeof(b), "%.0f km/h", m.gpsSpeedKmh);
+      snprintf(c, sizeof(c), "heading %d deg", (int)lroundf(m.gpsCourse));
+    } else {
+      snprintf(b, sizeof(b), "Stationary");
+      c[0] = 0;
+    }
+  } else { snprintf(b, sizeof(b), "-"); snprintf(c, sizeof(c), m.gpsState == 2 ? "geometry too poor" : ""); }
   lv_label_set_text(stVal[10], b); lv_label_set_text(stSub[10], c);
 
   if (m.hasPos) {

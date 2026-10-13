@@ -1,6 +1,6 @@
 # TDOS-005: GPS tiles show impossible values without a real fix
 
-**Type:** bug  **Status:** open  **Area:** Status screen, GPS parser
+**Type:** bug  **Status:** done  **Area:** Status screen, GPS parser
 
 ## Evidence (two photos of the Status screen, same session, device stationary indoors)
 
