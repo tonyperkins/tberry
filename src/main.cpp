@@ -29,6 +29,8 @@
 #include "messages.h"
 #include "settings.h"
 #include "storage.h"
+#include "nodes.h"
+#include "rangetest.h"
 
 #define PUBLIC_GROUP_PSK "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -96,7 +98,7 @@ static void chatPush(const char* fmt, ...) {
 // ── The mesh node ────────────────────────────────────────────────
 class DeckMesh : public BaseChatMesh {
   fs::FS* _fs = nullptr;
-  struct Pending { uint32_t ack; int conv; uint32_t msgId; uint32_t sentMs; };
+  struct Pending { uint32_t ack; int conv; uint32_t msgId; uint32_t sentMs; bool test; };
   static constexpr int MAX_PENDING = 6;
   Pending _pending[MAX_PENDING] = {};
   int _pubConv = -1;
@@ -169,6 +171,8 @@ protected:
     chatPush("%s %s (%d hops)", is_new ? "New:" : "Heard:", contact.name, (int)path_len);
     lastHeardMs = millis();
     if (contact.type == ADV_TYPE_CHAT) msgs_ensure(contact.id.pub_key, contact.name, false);
+    nodes_seen(contact.id.pub_key, contact.name, contact.type, getRTCClock()->getCurrentTime(),
+               (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), path_len & 63);
     logf("advert %s type=%d new=%d hops=%d\n", contact.name, (int)contact.type, (int)is_new, (int)path_len);
     _dirty = true;
   }
@@ -182,6 +186,7 @@ protected:
         uint32_t rtt = millis() - p.sentMs;
         msgs_set_status(p.conv, p.msgId, MS_DELIVERED, (uint16_t)min<uint32_t>(65535, max<uint32_t>(1, rtt / 100)));
         chatPush("  delivered (%lu ms)", (unsigned long)rtt);
+        if (p.test) finishTest(p.conv, true, rtt);
         p.ack = 0;                       // the same ACK can arrive more than once
         break;
       }
@@ -190,6 +195,8 @@ protected:
   }
   void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override {
     lastHeardMs = millis();
+    nodes_seen(from.id.pub_key, from.name, from.type, getRTCClock()->getCurrentTime(),
+               (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), -1);
     int conv = msgs_ensure(from.id.pub_key, from.name, false);
     msgs_add(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED);
     chatPush("%s: %s", from.name, text);
@@ -209,12 +216,33 @@ protected:
   uint32_t calcDirectTimeoutMillisFor(uint32_t airtime, uint8_t path_len) const override {
     return 500 + (airtime * 6.0f + 250) * ((path_len & 63) + 1);
   }
+  // The radio's "last packet" values are those of the ACK that has just been processed.
+  void finishTest(int conv, bool ok, uint32_t rttMs) {
+    const Conv* c = msgs_conv(conv);
+    SigResult r = {};
+    r.ts = getRTCClock()->getCurrentTime();
+    if (c) strncpy(r.name, c->name, sizeof(r.name) - 1);
+    r.ok = ok;
+    r.rttMs = rttMs;
+    r.hops = -1;
+    if (ok) {
+      r.rssi = (int16_t)radio_driver.getLastRSSI();
+      r.snr4 = (int8_t)constrain((int)lroundf(radio_driver.getLastSNR() * 4.0f), -128, 127);
+      ContactInfo* ci = c ? lookupContactByPubKey(c->key, 4) : nullptr;
+      if (ci && ci->out_path_len != 0xFF) r.hops = ci->out_path_len & 63;
+      if (c) nodes_seen(c->key, nullptr, 0, r.ts, r.rssi, r.snr4 / 4.0f, r.hops);
+    }
+    sig_finish(r);
+    storage_log_signal(r.ts, r.name, ok, rttMs, r.hops, r.rssi, r.snr4 / 4.0f);
+  }
+
   void onSendTimeout() override {
     // MeshCore reports one timeout for the most recent send: fail the oldest message still waiting.
     Pending* oldest = nullptr;
     for (auto& p : _pending) if (p.ack && (!oldest || p.sentMs < oldest->sentMs)) oldest = &p;
     if (oldest) {
       msgs_set_status(oldest->conv, oldest->msgId, MS_FAILED);
+      if (oldest->test) finishTest(oldest->conv, false, millis() - oldest->sentMs);
       oldest->ack = 0;
     }
     chatPush("  no ack (timed out)");
@@ -249,7 +277,10 @@ public:
     _pubConv = msgs_ensure(CHANNEL_KEY, "Public", true);
     ContactsIterator iter = startContactsIterator();
     ContactInfo c;
-    while (iter.hasNext(this, c)) if (c.type == ADV_TYPE_CHAT) msgs_ensure(c.id.pub_key, c.name, false);
+    while (iter.hasNext(this, c)) {
+      if (c.type == ADV_TYPE_CHAT) msgs_ensure(c.id.pub_key, c.name, false);
+      nodes_seen(c.id.pub_key, c.name, c.type, c.last_advert_timestamp, 0, 0, -1);
+    }
   }
 
   // Writing the contact file takes ~0.5 s of flash time, so batch it instead of saving per advert.
@@ -261,6 +292,21 @@ public:
     }
   }
 
+  bool sendTest(int conv) {
+    const Conv* c = msgs_conv(conv);
+    if (!c || c->channel) return false;
+    char text[40];
+    snprintf(text, sizeof(text), "Range test %d", sig_total() + 1);
+    sig_begin(c->name, getRTCClock()->getCurrentTime());
+    if (sendConv(conv, text, true)) return true;
+    SigResult r = {};                      // could not even be queued: report it as a failed test
+    r.ts = getRTCClock()->getCurrentTime();
+    strncpy(r.name, c->name, sizeof(r.name) - 1);
+    r.hops = -1;
+    sig_finish(r);
+    return false;
+  }
+
   void advertise(int delayMs) {
     auto pkt = createSelfAdvert(name, 0.0, 0.0);
     if (pkt) sendFlood(pkt, delayMs);
@@ -268,7 +314,7 @@ public:
 
   // Sends `text` into a conversation and tracks its delivery. The outgoing message is stored
   // first so the UI shows it immediately with "sending...".
-  bool sendConv(int conv, const char* text) {
+  bool sendConv(int conv, const char* text, bool isTest = false) {
     const Conv* c = msgs_conv(conv);
     if (!c || !*text) return false;
     uint32_t now = getRTCClock()->getCurrentTime();
@@ -286,7 +332,7 @@ public:
     if (r == MSG_SEND_FAILED) { msgs_set_status(conv, id, MS_FAILED); return false; }
     msgs_set_status(conv, id, MS_SENT);
     for (auto& p : _pending) {
-      if (!p.ack) { p = { ack, conv, id, millis() }; return true; }
+      if (!p.ack) { p = { ack, conv, id, millis(), isTest }; return true; }
     }
     return true;                          // table full: delivered status just won't be tracked
   }
@@ -438,6 +484,7 @@ static const UiActions uiActions = {
     theMesh->advertise(0);                 // tell the mesh about the new name right away
   },
   /* advertise  */ []() { if (theMesh) { theMesh->advertise(0); chatPush("(advert sent)"); } },
+  /* sendTest   */ [](int conv) { return theMesh && theMesh->sendTest(conv); },
 };
 
 void setup() {

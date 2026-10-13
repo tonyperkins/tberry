@@ -12,6 +12,8 @@
 #include "ui.h"
 #include "messages.h"
 #include "settings.h"
+#include "nodes.h"
+#include "rangetest.h"
 #include "fonts/fonts.h"
 #include "emoji.h"
 
@@ -60,7 +62,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -76,6 +78,11 @@ static lv_obj_t* listBox;                // scrolling list used by Settings and 
 static int listN = 0, listSel = 0;
 static lv_obj_t *pinMsg, *pinDots[4];
 static lv_obj_t *brightSlider, *brightLbl;
+static lv_obj_t *nodesBox;
+static lv_obj_t *sigTarget, *sigBtnLbl, *sigStatus, *sigVal[4];
+static int sigConv = -1;                 // conversation the range test goes to
+static uint32_t sigStartMs = 0, sigShownVersion = 0, nodesShownVersion = 0, nodesBuiltMs = 0, nowUtc = 0;
+static int sigChoices[MAX_CONVS];
 static Mode returnTo = M_SETTINGS;       // where Back from a picker, entry or slider goes
 static char pickBuf[24][28];
 static int pickN = 0, pickCur = 0;
@@ -100,8 +107,8 @@ static int unreadShown = -1;
 struct App { const char* name; const char* sym; uint32_t col; const char* blurb; };
 static const App apps[6] = {
   { "Messages", LV_SYMBOL_ENVELOPE, 0x4C8DFF, "" },
-  { "Signal", LV_SYMBOL_WIFI, 0xFFB547, "One-tap range test with a log." },
-  { "Nodes", LV_SYMBOL_LIST, 0x2FC4B2, "Who you can hear right now." },
+  { "Signal", LV_SYMBOL_WIFI, 0xFFB547, "" },
+  { "Nodes", LV_SYMBOL_LIST, 0x2FC4B2, "" },
   { "Map", LV_SYMBOL_GPS, 0x8B7CFF, "Your position and nearby nodes." },
   { "Status", LV_SYMBOL_BATTERY_3, 0x43C77B, "Battery, uptime, health." },
   { "Settings", LV_SYMBOL_SETTINGS, 0x66758A, "Name, brightness, advanced.\nBuilt next." },
@@ -188,6 +195,7 @@ static uint32_t avatarColor(const char* name) {
 // ── navigation ───────────────────────────────────────────────────
 static void showHome();
 static void openApp(int i);
+static void openNodes();
 static void openConvs();
 static void openThread(int conv);
 static void goBack();
@@ -200,7 +208,7 @@ static void setSel(int i) {
 static void releaseApp() {            // forget pointers into the app screen before it goes away
   dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr;
   listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
-  brightSlider = nullptr; brightLbl = nullptr;
+  brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
   curConv = -1;
   msgs_set_open(-1);
 }
@@ -247,10 +255,13 @@ static void tileCb(lv_event_t* e) { openApp((int)(intptr_t)lv_event_get_user_dat
 
 static void openSettings();
 static void openAdvanced();
+static void openSignal();
 static void goBack() {
   if (mode == M_THREAD) { openConvs(); return; }
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
-    if (returnTo == M_ADV) openAdvanced(); else openSettings();
+    if (returnTo == M_ADV) openAdvanced();
+    else if (returnTo == M_SIGNAL) openSignal();
+    else openSettings();
     return;
   }
   if (mode == M_PIN || mode == M_ADV) { openSettings(); return; }
@@ -273,6 +284,8 @@ static void openApp(int i) {
   if (i < 0 || i > 5) return;
   if (i == 0) { openConvs(); return; }
   if (i == 5) { openSettings(); return; }
+  if (i == 1) { openSignal(); return; }
+  if (i == 2) { openNodes(); return; }
   mode = M_APP;
   lv_obj_t* s = newScreen();
   headerFor(s, apps[i].name);
@@ -393,7 +406,10 @@ static void buildThread() {
     lv_obj_set_style_pad_row(row, 2, 0);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    // Items align inside a track that is only as wide as the widest item, and the track itself is
+    // then placed in the row: both have to say END for a sent message to sit at the right edge.
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
+                          m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
 
     lv_obj_t* b = lv_obj_create(row);
     lv_obj_set_width(b, LV_SIZE_CONTENT);
@@ -1087,6 +1103,213 @@ static void advAct(int id) {
   }
 }
 
+// ── Nodes: everyone heard on the mesh ────────────────────────────
+static const char* typeName(uint8_t t) {
+  return t == 1 ? "Person" : t == 2 ? "Repeater" : t == 3 ? "Room" : t == 4 ? "Sensor" : "Node";
+}
+static uint32_t typeColor(uint8_t t, const char* name) {
+  return t == 2 ? 0x2FC4B2 : t == 3 ? 0x8B7CFF : t == 4 ? 0x43C77B : avatarColor(name);
+}
+static void formatAge(uint32_t ts, char* out, size_t n) {
+  if (!ts || nowUtc < 1700000000UL || nowUtc < ts) { snprintf(out, n, "-"); return; }
+  uint32_t d = nowUtc - ts;
+  if (d < 60) snprintf(out, n, "now");
+  else if (d < 3600) snprintf(out, n, "%um", (unsigned)(d / 60));
+  else if (d < 86400) snprintf(out, n, "%uh", (unsigned)(d / 3600));
+  else snprintf(out, n, "%ud", (unsigned)(d / 86400));
+}
+
+static void fillNodes() {
+  if (!nodesBox) return;
+  int keep = lv_obj_get_scroll_y(nodesBox);
+  lv_obj_clean(nodesBox);
+  int n = nodes_count();
+  if (n == 0) {
+    lv_obj_t* t = label(nodesBox, "Nobody heard yet.\\nNodes appear as they advertise.", &font_tdos_14, MUTE);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(t, LV_ALIGN_CENTER, 0, 10);
+    return;
+  }
+  for (int r = 0; r < n; r++) {
+    const NodeInfo* ni = nodes_sorted(r);
+    lv_obj_t* row = box(nodesBox, 312, 46, RAISE, 12);
+    lv_obj_set_pos(row, 4, r * 50);
+    lv_obj_t* av = box(row, 30, 30, typeColor(ni->type, ni->name), 15);
+    lv_obj_set_pos(av, 8, 8);
+    char ini[2] = { ni->type == 2 ? 'R' : ni->type == 3 ? 'S' : (char)toupper((unsigned char)ni->name[0]), 0 };
+    lv_obj_center(label(av, ini[0] ? ini : "?", &font_tdos_14, INK));
+
+    char nm[48];
+    emoji_filter(ni->name, nm, sizeof(nm), true);
+    lv_obj_t* name = label(row, nm[0] ? nm : "(unnamed)", emoji_font(&font_tdos_14), TEXT);
+    lv_obj_set_pos(name, 46, 4);
+    lv_obj_set_width(name, 180);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+
+    char sub[48];
+    if (ni->hops < 0) snprintf(sub, sizeof(sub), "%s", typeName(ni->type));
+    else if (ni->hops == 0) snprintf(sub, sizeof(sub), "%s, direct", typeName(ni->type));
+    else snprintf(sub, sizeof(sub), "%s, %d hop%s", typeName(ni->type), ni->hops, ni->hops == 1 ? "" : "s");
+    lv_obj_t* sl = label(row, sub, &font_tdos_12, MUTE);
+    lv_obj_set_pos(sl, 46, 25);
+
+    char sig[24], age[12];
+    formatAge(ni->lastTs, age, sizeof(age));
+    if (ni->rssi) snprintf(sig, sizeof(sig), "%d dBm\\n%s", ni->rssi, age);
+    else snprintf(sig, sizeof(sig), "\\n%s", age);
+    lv_obj_t* rt = label(row, sig, &font_tdos_12, ni->rssi > -100 || !ni->rssi ? TEXT : ACCENT);
+    lv_obj_set_style_text_align(rt, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(rt, LV_ALIGN_RIGHT_MID, -10, 0);
+  }
+  lv_obj_scroll_to_y(nodesBox, keep, LV_ANIM_OFF);
+}
+
+static void openNodes() {
+  mode = M_NODES;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Nodes");
+  nodesBox = lv_obj_create(s);
+  lv_obj_set_size(nodesBox, 320, 240 - 58);
+  lv_obj_set_pos(nodesBox, 0, 58);
+  lv_obj_set_style_bg_opa(nodesBox, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(nodesBox, 0, 0);
+  lv_obj_set_style_pad_all(nodesBox, 0, 0);
+  lv_obj_set_scrollbar_mode(nodesBox, LV_SCROLLBAR_MODE_OFF);
+  fillNodes();
+  nodesShownVersion = nodes_version();
+  nodesBuiltMs = millis();
+  loadApp(s);
+}
+
+// ── Signal: a one-tap range test ─────────────────────────────────
+static void sigPickDefault() {
+  const Conv* c = msgs_conv(sigConv);
+  if (c && !c->channel) return;
+  int order[MAX_CONVS];
+  int n = msgs_sorted(order, MAX_CONVS);
+  sigConv = -1;
+  for (int i = 0; i < n; i++) {
+    const Conv* k = msgs_conv(order[i]);
+    if (k && !k->channel) { sigConv = order[i]; break; }
+  }
+}
+
+static void refreshSignal() {
+  if (!sigStatus) return;
+  const Conv* c = msgs_conv(sigConv);
+  char nm[48];
+  emoji_filter(c ? c->name : "", nm, sizeof(nm), false);
+  lv_label_set_text(sigTarget, c ? nm : "No one to test with yet");
+
+  const SigResult* r = sig_last();
+  bool busy = sig_pending();
+  char b[40];
+  if (r && r->ok) {
+    snprintf(b, sizeof(b), "%.1f s", r->rttMs / 1000.0f);
+    lv_label_set_text(sigVal[0], b);
+    if (r->hops < 0) snprintf(b, sizeof(b), "flood"); else snprintf(b, sizeof(b), "%d", r->hops);
+    lv_label_set_text(sigVal[1], b);
+    snprintf(b, sizeof(b), "%d", r->rssi);
+    lv_label_set_text(sigVal[2], b);
+    snprintf(b, sizeof(b), "%.1f", r->snr4 / 4.0f);
+    lv_label_set_text(sigVal[3], b);
+  } else {
+    for (int i = 0; i < 4; i++) lv_label_set_text(sigVal[i], "-");
+  }
+
+  if (busy) {
+    snprintf(b, sizeof(b), "Testing... %us", (unsigned)((millis() - sigStartMs) / 1000));
+    lv_label_set_text(sigStatus, b);
+    lv_obj_set_style_text_color(sigStatus, C(ACCENT), 0);
+    lv_label_set_text(sigBtnLbl, "Testing...");
+  } else {
+    lv_label_set_text(sigBtnLbl, "Send range test");
+    if (!r) {
+      lv_label_set_text(sigStatus, "Sends a short message and times the reply.");
+      lv_obj_set_style_text_color(sigStatus, C(MUTE), 0);
+    } else if (r->ok) {
+      snprintf(b, sizeof(b), "Delivered. Test %d of this session.", sig_total());
+      lv_label_set_text(sigStatus, b);
+      lv_obj_set_style_text_color(sigStatus, C(GOOD), 0);
+    } else {
+      lv_label_set_text(sigStatus, "No reply. Out of range, or no route.");
+      lv_obj_set_style_text_color(sigStatus, C(BAD), 0);
+    }
+  }
+}
+
+static void sigSend() {
+  if (sig_pending()) return;
+  sigPickDefault();
+  if (sigConv < 0) { toast("Nobody known yet. Wait for an advert."); return; }
+  sigStartMs = millis();
+  if (!actions.sendTest || !actions.sendTest(sigConv)) toast("Could not send the test");
+  refreshSignal();
+}
+static void sigSendCb(lv_event_t*) { sigSend(); }
+
+static void pickSig(int i) {
+  if (i >= 0 && i < MAX_CONVS) sigConv = sigChoices[i];
+  openSignal();
+}
+static void sigTargetCb(lv_event_t*) {
+  int order[MAX_CONVS];
+  int n = msgs_sorted(order, MAX_CONVS), m = 0, cur = 0;
+  for (int i = 0; i < n && m < 24; i++) {
+    const Conv* k = msgs_conv(order[i]);
+    if (!k || k->channel) continue;
+    if (order[i] == sigConv) cur = m;
+    sigChoices[m] = order[i];
+    emoji_filter(k->name, pickBuf[m], sizeof(pickBuf[m]), false);
+    m++;
+  }
+  if (m == 0) { toast("Nobody known yet"); return; }
+  openPicker("Test with", m, cur, pickSig, M_SIGNAL);
+}
+
+static void openSignal() {
+  mode = M_SIGNAL;
+  returnTo = M_SIGNAL;
+  sigPickDefault();
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Signal");
+
+  lv_obj_t* target = tappable(box(s, 312, 36, RAISE, 12));
+  lv_obj_set_pos(target, 4, 60);
+  lv_obj_set_style_border_color(target, C(ACCENT), 0);
+  lv_obj_set_style_border_width(target, 0, 0);
+  lv_obj_t* to = label(target, "To", &font_tdos_12, MUTE);
+  lv_obj_align(to, LV_ALIGN_LEFT_MID, 12, 0);
+  sigTarget = label(target, "", &font_tdos_14, TEXT);
+  lv_obj_align(sigTarget, LV_ALIGN_LEFT_MID, 40, 0);
+  lv_obj_set_width(sigTarget, 230);
+  lv_label_set_long_mode(sigTarget, LV_LABEL_LONG_CLIP);
+  lv_obj_t* chev = label(target, LV_SYMBOL_RIGHT, &font_tdos_14, TEXT);
+  lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -10, 0);
+  lv_obj_add_event_cb(target, sigTargetCb, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* btn = tappable(box(s, 312, 44, ACCENT, 14));
+  lv_obj_set_pos(btn, 4, 102);
+  sigBtnLbl = label(btn, "Send range test", &font_tdos_16, INK);
+  lv_obj_center(sigBtnLbl);
+  lv_obj_add_event_cb(btn, sigSendCb, LV_EVENT_CLICKED, nullptr);
+
+  const char* caps[4] = { "ROUND TRIP", "HOPS", "RSSI dBm", "SNR dB" };
+  for (int i = 0; i < 4; i++) {
+    lv_obj_t* t = box(s, 74, 52, RAISE, 12);
+    lv_obj_set_pos(t, 4 + i * 79, 154);
+    sigVal[i] = label(t, "-", &font_tdos_16, TEXT);
+    lv_obj_align(sigVal[i], LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_t* c = label(t, caps[i], &font_tdos_12, MUTE);
+    lv_obj_align(c, LV_ALIGN_BOTTOM_MID, 0, -6);
+  }
+  sigStatus = label(s, "", &font_tdos_12, MUTE);
+  lv_obj_set_pos(sigStatus, 8, 214);
+  sigShownVersion = sig_version();
+  refreshSignal();
+  loadApp(s);
+}
+
 // ── building the screens ─────────────────────────────────────────
 static void buildStatusBar() {
   bar = box(lv_layer_top(), 320, 22, INK, 0);
@@ -1257,6 +1480,17 @@ void ui_update(const UiModel& m) {
     }
   }
 
+  nowUtc = m.clockValid ? m.utc : 0;
+  if (mode == M_SIGNAL && sigStatus && (sig_version() != sigShownVersion || sig_pending())) {
+    sigShownVersion = sig_version();
+    refreshSignal();
+  }
+  if (mode == M_NODES && nodesBox && (nodes_version() != nodesShownVersion || millis() - nodesBuiltMs > 10000)) {
+    nodesShownVersion = nodes_version();
+    nodesBuiltMs = millis();
+    fillNodes();
+  }
+
   // Redraw Messages screens only when the store actually changed.
   uint32_t v = msgs_version();
   if (v != shownVersion) {
@@ -1292,6 +1526,8 @@ void ui_nav(int dx, int dy) {
       listHighlight();
       lv_obj_scroll_to_y(listBox, max(0, listSel * 38 - 76), LV_ANIM_OFF);
     }
+  } else if (mode == M_NODES && dy && nodesBox) {
+    lv_obj_scroll_by(nodesBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_BRIGHT && dx && brightSlider) {
     int v = constrain(lv_slider_get_value(brightSlider) + dx, 1, 16);
     lv_slider_set_value(brightSlider, v, LV_ANIM_OFF);
@@ -1306,6 +1542,7 @@ void ui_click() {
   else if (mode == M_CONVS && convN > 0) openThread(convOrder[convSel]);
   else if (mode == M_THREAD) doSend();
   else if (mode == M_ENTRY) entrySave();
+  else if (mode == M_SIGNAL) sigSend();
   else if ((mode == M_SETTINGS || mode == M_ADV || mode == M_PICK) && listN > 0) {
     if (mode == M_SETTINGS) settingsAct(listIds[listSel]);
     else if (mode == M_ADV) advAct(listIds[listSel]);
@@ -1345,7 +1582,7 @@ void ui_key(char c) {
     if (c == 8 || c == 127) { if (pinLen == 0) goBack(); else ui_pin_key(9); return; }
     return;
   }
-  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT) && (c == 8 || c == 127)) { goBack(); return; }
+  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES) && (c == 8 || c == 127)) { goBack(); return; }
 }
 
 bool ui_console_active() { return mode == M_DBG; }

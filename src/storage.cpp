@@ -158,6 +158,17 @@ void storage_load_messages() {
   for (int i = 0; i < MAX_CONVS; i++) msgs_mark_read(i);
 }
 
+// One line per range test, for later analysis: time, who, result, round trip, hops, RSSI, SNR.
+void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, int hops, int rssi, float snr) {
+  if (!ready) return;
+  bool fresh = !SD.exists("/tdos/signal.csv");
+  File f = SD.open("/tdos/signal.csv", FILE_APPEND);
+  if (!f) return;
+  if (fresh) f.println("utc,node,result,rtt_ms,hops,rssi_dbm,snr_db");
+  f.printf("%lu,%s,%s,%lu,%d,%d,%.1f\n", (unsigned long)ts, name, ok ? "ok" : "timeout", (unsigned long)rttMs, hops, rssi, snr);
+  f.close();
+}
+
 void storage_tick() {
   if (!ready || qCount == 0) return;
   uint32_t now = millis();

@@ -36,5 +36,6 @@ struct UiActions {
   void (*applyRadio)();                    // use the radio parameters now in cfg()
   void (*setName)(const char* name);       // rename the node and re-advertise
   void (*advertise)();                     // send an advert now
+  bool (*sendTest)(int conv);              // send a range-test message into a conversation
 };
 void ui_set_actions(const UiActions& a);
