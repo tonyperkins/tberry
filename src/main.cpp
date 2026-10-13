@@ -172,7 +172,8 @@ protected:
     lastHeardMs = millis();
     if (contact.type == ADV_TYPE_CHAT) msgs_ensure(contact.id.pub_key, contact.name, false);
     nodes_seen(contact.id.pub_key, contact.name, contact.type, getRTCClock()->getCurrentTime(),
-               (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), path_len & 63);
+               (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), path_len & 63,
+               contact.gps_lat, contact.gps_lon);
     logf("advert %s type=%d new=%d hops=%d\n", contact.name, (int)contact.type, (int)is_new, (int)path_len);
     _dirty = true;
   }
@@ -358,6 +359,7 @@ static uint32_t loopRecentShown = 0;  // the previous minute's value, which is w
 // ── GPS: only the time is used, from RMC sentences ──────────────
 static bool gpsFix = false;
 static uint32_t gpsFixMs = 0;
+static int32_t gpsLatE6 = 0, gpsLonE6 = 0;      // last position, micro-degrees
 static void pollGps() {
   static char line[96];
   static int n = 0;
@@ -378,6 +380,16 @@ static void pollGps() {
           t.tm_mon  = (f[9][2] - '0') * 10 + (f[9][3] - '0') - 1;
           t.tm_year = 100 + (f[9][4] - '0') * 10 + (f[9][5] - '0');
           time_t epoch = mktime(&t);                 // the ESP32 default timezone is UTC
+          // position: ddmm.mmmm,N,dddmm.mmmm,E
+          if (nf >= 7 && strlen(f[3]) > 4 && strlen(f[5]) > 5) {
+            double la = atof(f[3]), lo = atof(f[5]);
+            double lat = floor(la / 100.0) + fmod(la, 100.0) / 60.0;
+            double lon = floor(lo / 100.0) + fmod(lo, 100.0) / 60.0;
+            if (f[4][0] == 'S') lat = -lat;
+            if (f[6][0] == 'W') lon = -lon;
+            gpsLatE6 = (int32_t)lround(lat * 1e6);
+            gpsLonE6 = (int32_t)lround(lon * 1e6);
+          }
           if (epoch > 1700000000L) {
             gpsFix = true; gpsFixMs = millis();
             int32_t diff = (int32_t)(epoch - (time_t)rtc.getCurrentTime());
@@ -464,6 +476,10 @@ static void buildModel(UiModel& m) {
   m.psramKb = ESP.getFreePsram() / 1024;
   m.timeSource = gpsFix ? 2 : (m.clockValid ? 1 : 0);
   m.sdReady = storage_ready();
+  m.hasPos = gpsFix && (gpsLatE6 || gpsLonE6);
+  m.latE6 = gpsLatE6;
+  m.lonE6 = gpsLonE6;
+  m.sdFreeMb = storage_free_mb();
   if (storage_ready()) snprintf(m.storage, sizeof(m.storage), "SD, %lu MB free", (unsigned long)storage_free_mb());
   else snprintf(m.storage, sizeof(m.storage), "No SD card");
   if (theMesh) strncpy(m.nodeName, theMesh->name, sizeof(m.nodeName) - 1);

@@ -13,6 +13,7 @@
 #include "messages.h"
 #include "settings.h"
 #include "nodes.h"
+#include "mapview.h"
 #include "rangetest.h"
 #include "fonts/fonts.h"
 #include "emoji.h"
@@ -62,11 +63,13 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
 static UiSendFn sendFn = nullptr;
+enum Gesture { G_NONE, G_BACK, G_HOME, G_QUICK };
+static Gesture pendingGesture = G_NONE;     // set by the touch callback, run from ui_tick()
 
 static lv_obj_t *scrLock, *scrHome, *scrApp;        // scrApp: whichever non-home screen is open
 static lv_obj_t *bar, *barTime, *barSig, *barBatt;
@@ -111,7 +114,7 @@ static const App apps[6] = {
   { "Messages", LV_SYMBOL_ENVELOPE, 0x4C8DFF, "" },
   { "Signal", LV_SYMBOL_WIFI, 0xFFB547, "" },
   { "Nodes", LV_SYMBOL_LIST, 0x2FC4B2, "" },
-  { "Map", LV_SYMBOL_GPS, 0x8B7CFF, "Your position and nearby nodes." },
+  { "Map", LV_SYMBOL_GPS, 0x8B7CFF, "" },
   { "Status", LV_SYMBOL_BATTERY_3, 0x43C77B, "" },
   { "Settings", LV_SYMBOL_SETTINGS, 0x66758A, "Name, brightness, advanced.\nBuilt next." },
 };
@@ -197,6 +200,7 @@ static uint32_t avatarColor(const char* name) {
 // ── navigation ───────────────────────────────────────────────────
 static void showHome();
 static void openApp(int i);
+static void openMap();
 static void openNodes();
 static void openStatus();
 static void openConvs();
@@ -210,6 +214,7 @@ static void setSel(int i) {
 
 static void releaseApp() {            // forget pointers into the app screen before it goes away
   dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr;
+  if (mapview_active()) mapview_destroy();
   listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
   brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; stPill = nullptr; stNote = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
   curConv = -1;
@@ -222,7 +227,9 @@ static void wake() {
   showHome();
 }
 
+static void closeQuick(bool immediate);
 static void goLock() {
+  closeQuick(true);
   mode = M_LOCK;
   lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
   lv_obj_t* old = lv_scr_act();
@@ -290,6 +297,7 @@ static void openApp(int i) {
   if (i == 1) { openSignal(); return; }
   if (i == 2) { openNodes(); return; }
   if (i == 4) { openStatus(); return; }
+  if (i == 3) { openMap(); return; }
   mode = M_APP;
   lv_obj_t* s = newScreen();
   headerFor(s, apps[i].name);
@@ -1350,8 +1358,14 @@ static void refreshStatus() {
   snprintf(c, sizeof(c), "SF%d  BW %.4g  4/%d", cs.sf, cs.bw, cs.cr);
   lv_label_set_text(stVal[4], b); lv_label_set_text(stSub[4], c);
 
-  lv_label_set_text(stVal[5], m.sdReady ? "SD card" : "No SD card");
-  lv_label_set_text(stSub[5], lastStorage[0] ? lastStorage : "");
+  if (m.sdReady) {
+    snprintf(b, sizeof(b), "%.1f GB free", m.sdFreeMb / 1024.0f);
+    lv_label_set_text(stVal[5], "SD card");
+    lv_label_set_text(stSub[5], b);
+  } else {
+    lv_label_set_text(stVal[5], "No SD card");
+    lv_label_set_text(stSub[5], "history is not saved");
+  }
 
   // Healthy means: no long stalls, memory not running out, and the radio is working.
   bool stalls = m.loopWorstMs > 400;
@@ -1360,8 +1374,8 @@ static void refreshStatus() {
   bool ok = !stalls && !lowMem && !errs;
   lv_label_set_text(stPillLbl, ok ? "Healthy" : "Check");
   lv_obj_set_style_bg_color(stPill, C(ok ? GOOD : ACCENT), 0);
-  const char* ts = m.timeSource == 2 ? "GPS time" : m.timeSource == 1 ? "mesh time" : "no clock";
-  snprintf(b, sizeof(b), "worst loop %lu ms, %lu KB free, %s", (unsigned long)m.loopWorstMs, (unsigned long)m.heapKb, ts);
+  const char* ts = m.timeSource == 2 ? "GPS" : m.timeSource == 1 ? "mesh" : "no clock";
+  snprintf(b, sizeof(b), "loop %lu ms, %lu KB, %s", (unsigned long)m.loopWorstMs, (unsigned long)m.heapKb, ts);
   lv_label_set_text(stNote, b);
 }
 
@@ -1393,6 +1407,105 @@ static void openStatus() {
   lv_obj_set_width(stNote, 226);
   lv_label_set_long_mode(stNote, LV_LABEL_LONG_CLIP);
   refreshStatus();
+  loadApp(s);
+}
+
+// ── Quick panel: swipe down from the top edge ────────────────────
+static lv_obj_t *quickBackdrop = nullptr;
+static bool quickOpen = false;
+
+static void closeQuick(bool immediate = false) {
+  if (!quickOpen) return;
+  quickOpen = false;
+  lv_obj_t* b = quickBackdrop;
+  quickBackdrop = nullptr;
+  if (!b) return;
+  if (immediate) lv_obj_del(b);
+  else lv_obj_del_async(b);               // closing from a tap on one of its own buttons
+}
+static void quickBackdropCb(lv_event_t*) { closeQuick(); }
+static void quickBrightCb(lv_event_t* e) {
+  int v = constrain(lv_slider_get_value(lv_event_get_target(e)), 1, 16);
+  cfg().brightness = (uint8_t)v;
+  setBacklight(v);
+  settings_changed();
+}
+static void quickAdvertCb(lv_event_t*) {
+  if (actions.advertise) actions.advertise();
+  closeQuick();
+  toast("Advert sent");
+}
+static void quickLockCb(lv_event_t*) { closeQuick(); pendingGesture = G_NONE; goLock(); }
+static void quickSettingsCb(lv_event_t*) { closeQuick(); openSettings(); }
+
+static void openQuick() {
+  if (quickOpen || mode == M_LOCK) return;
+  quickOpen = true;
+  // The backdrop dims the screen and catches any tap outside the panel as "close".
+  quickBackdrop = tappable(box(lv_layer_top(), 320, 240, 0x000000, 0));
+  lv_obj_set_style_bg_opa(quickBackdrop, LV_OPA_50, 0);
+  lv_obj_set_pos(quickBackdrop, 0, 0);
+  lv_obj_add_event_cb(quickBackdrop, quickBackdropCb, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* panel = box(quickBackdrop, 320, 128, RAISE, 0);
+  lv_obj_set_pos(panel, 0, 22);
+  lv_obj_t* title = label(panel, "Quick settings", &font_tdos_12, MUTE);
+  lv_obj_set_pos(title, 12, 8);
+
+  lv_obj_t* sun = label(panel, LV_SYMBOL_EYE_OPEN, &font_tdos_14, TEXT);
+  lv_obj_set_pos(sun, 12, 32);
+  lv_obj_t* sl = lv_slider_create(panel);
+  lv_obj_set_size(sl, 250, 14);
+  lv_obj_set_pos(sl, 46, 36);
+  lv_slider_set_range(sl, 1, 16);
+  lv_slider_set_value(sl, cfg().brightness, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(sl, C(RAISE2), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(sl, C(ACCENT), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(sl, C(TEXT), LV_PART_KNOB);
+  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_KNOB);
+  lv_obj_set_style_pad_all(sl, 5, LV_PART_KNOB);
+  lv_obj_add_event_cb(sl, quickBrightCb, LV_EVENT_VALUE_CHANGED, nullptr);
+
+  struct Btn { const char* text; const char* sym; lv_event_cb_t cb; };
+  const Btn btns[3] = {
+    { "Advert", LV_SYMBOL_UPLOAD, quickAdvertCb },
+    { "Lock", LV_SYMBOL_POWER, quickLockCb },
+    { "Settings", LV_SYMBOL_SETTINGS, quickSettingsCb },
+  };
+  for (int i = 0; i < 3; i++) {
+    lv_obj_t* b = tappable(box(panel, 96, 52, RAISE2, 14));
+    lv_obj_set_pos(b, 10 + i * 104, 66);
+    lv_obj_t* ic = label(b, btns[i].sym, &font_tdos_16, ACCENT);
+    lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
+    lv_obj_t* tx = label(b, btns[i].text, &font_tdos_12, TEXT);
+    lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_add_event_cb(b, btns[i].cb, LV_EVENT_CLICKED, nullptr);
+  }
+
+  // Slide down from above the screen.
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, panel);
+  lv_anim_set_values(&a, -128, 22);
+  lv_anim_set_time(&a, 160);
+  lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+// ── Map ──────────────────────────────────────────────────────────
+static void openMap() {
+  mode = M_MAP;
+  lv_obj_t* s = newScreen();
+  mapview_create(s);
+  // a small back button over the map (the tiles are the whole screen)
+  lv_obj_t* back = tappable(box(s, 36, 28, RAISE, 10));
+  lv_obj_set_style_bg_opa(back, LV_OPA_80, 0);
+  lv_obj_set_pos(back, 6, 28);
+  lv_obj_center(label(back, LV_SYMBOL_LEFT, &font_tdos_14, TEXT));
+  lv_obj_add_event_cb(back, backCb, LV_EVENT_CLICKED, nullptr);
   loadApp(s);
 }
 
@@ -1448,37 +1561,82 @@ static void buildHome() {
   lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);
 }
 
-// ── touch read callback ──────────────────────────────────────────
+// ── touch read callback, with edge swipes ────────────────────────
+// A touch that starts in an edge zone is held back from LVGL until it is clear what it is:
+//   left edge, swipe in     back          bottom edge, swipe up   home
+//   top edge, swipe down    quick panel
+// If the finger is lifted without a swipe it was an ordinary tap that happened near an edge, and
+// it is replayed to LVGL as a press and release at the point where it began.
+static constexpr int EDGE_LEFT = 20, EDGE_BOTTOM = 20, EDGE_TOP = 18;    // zone sizes in pixels
+static constexpr int SWIPE_MIN = 36;                                     // travel needed to count
+
 static void touchRead(lv_indev_drv_t*, lv_indev_data_t* data) {
-  static int16_t lastX = 0, lastY = 0;
-  data->state = LV_INDEV_STATE_RELEASED;
-  data->point.x = lastX;
-  data->point.y = lastY;
-  if (!touchAddr) return;
-  uint8_t s;
-  if (!gt911Read(0x814E, &s, 1)) return;
-  if (!(s & 0x80)) return;                       // no new report
-  uint8_t n = s & 0x0F;
-  bool down = false;
-  if (n > 0) {
-    uint8_t p[4];
-    if (gt911Read(0x8150, p, 4)) {
-      int px = p[0] | (p[1] << 8), py = p[2] | (p[3] << 8);
-      lastX = (int16_t)constrain(py, 0, 319);       // portrait panel -> landscape (rotation 1)
-      lastY = (int16_t)constrain(239 - px, 0, 239);
-      down = true;
+  static int16_t lastX = 0, lastY = 0;        // most recent position, reported to LVGL
+  static bool down = false, edge = false, fired = false;
+  static int16_t sx = 0, sy = 0;              // where the current touch began
+  static int edgeKind = 0;                    // 1 left, 2 bottom, 3 top
+  static uint8_t tapPhase = 0;                // replaying a tap: 1 = press, 2 = release
+  static int16_t tapX = 0, tapY = 0;
+
+  bool have = false, nowDown = false;
+  if (touchAddr) {
+    uint8_t s;
+    if (gt911Read(0x814E, &s, 1) && (s & 0x80)) {
+      have = true;
+      uint8_t n = s & 0x0F;
+      if (n > 0) {
+        uint8_t p[4];
+        if (gt911Read(0x8150, p, 4)) {
+          int px = p[0] | (p[1] << 8), py = p[2] | (p[3] << 8);
+          lastX = (int16_t)constrain(py, 0, 319);        // portrait panel -> landscape (rotation 1)
+          lastY = (int16_t)constrain(239 - px, 0, 239);
+          nowDown = true;
+        }
+      }
+      gt911Clear();
     }
   }
-  gt911Clear();
-  if (down) {
+
+  if (have && nowDown) {
     lastActivityMs = millis();
-    if (mode == M_LOCK) { wake(); touchHeld = true; }
-    if (!touchHeld) data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = lastX;
-    data->point.y = lastY;
-  } else {
+    if (!down) {                                          // a new touch begins
+      down = true;
+      sx = lastX; sy = lastY;
+      fired = false;
+      edgeKind = 0;
+      if (mode == M_LOCK) { wake(); touchHeld = true; }
+      else if (lastX <= EDGE_LEFT) edgeKind = 1;
+      else if (lastY >= 240 - EDGE_BOTTOM) edgeKind = 2;
+      else if (lastY <= EDGE_TOP) edgeKind = 3;
+      edge = edgeKind != 0;
+    } else if (edge && !fired) {                          // moving: has it become a swipe?
+      int dx = lastX - sx, dy = lastY - sy;
+      if (edgeKind == 1 && dx >= SWIPE_MIN && abs(dy) < abs(dx)) { pendingGesture = G_BACK; fired = true; }
+      else if (edgeKind == 2 && dy <= -SWIPE_MIN && abs(dx) < abs(dy)) { pendingGesture = G_HOME; fired = true; }
+      else if (edgeKind == 3 && dy >= SWIPE_MIN && abs(dx) < abs(dy)) { pendingGesture = G_QUICK; fired = true; }
+    }
+  } else if (have && !nowDown && down) {                  // the finger was lifted
+    down = false;
     touchHeld = false;
+    if (edge && !fired) { tapPhase = 1; tapX = sx; tapY = sy; }   // just a tap near an edge
+    edge = false;
   }
+
+  if (tapPhase == 1) {
+    data->state = LV_INDEV_STATE_PRESSED;
+    data->point.x = tapX; data->point.y = tapY;
+    tapPhase = 2;
+    return;
+  }
+  if (tapPhase == 2) {
+    data->state = LV_INDEV_STATE_RELEASED;
+    data->point.x = tapX; data->point.y = tapY;
+    tapPhase = 0;
+    return;
+  }
+  data->point.x = lastX;
+  data->point.y = lastY;
+  data->state = (down && !edge && !touchHeld) ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
 // ── public API ───────────────────────────────────────────────────
@@ -1515,8 +1673,21 @@ void ui_init() {
 
 void ui_activity() { lastActivityMs = millis(); }
 
+static void runGesture() {
+  Gesture g = pendingGesture;
+  pendingGesture = G_NONE;
+  if (g == G_NONE || mode == M_LOCK) return;
+  ui_activity();
+  if (quickOpen) { closeQuick(true); return; }           // any edge swipe first dismisses the panel
+  if (g == G_QUICK) { openQuick(); return; }
+  if (g == G_HOME) { if (mode != M_HOME) showHome(); return; }
+  if (g == G_BACK) { if (mode != M_HOME) goBack(); return; }
+}
+
 void ui_tick() {
   lv_timer_handler();
+  runGesture();
+  mapview_tick();
   if (mode != M_LOCK && millis() - lastActivityMs > IDLE_LOCK_MS) goLock();
 }
 
@@ -1570,8 +1741,9 @@ void ui_update(const UiModel& m) {
   stLast.batteryPct = m.batteryPct; stLast.charging = m.charging; stLast.batteryMv = m.batteryMv;
   stLast.uptimeSec = m.uptimeSec; stLast.packetsRx = m.packetsRx; stLast.packetsTx = m.packetsTx;
   stLast.rxErrors = m.rxErrors; stLast.airtimeMs = m.airtimeMs; stLast.loopWorstMs = m.loopWorstMs;
-  stLast.heapKb = m.heapKb; stLast.psramKb = m.psramKb; stLast.timeSource = m.timeSource; stLast.sdReady = m.sdReady;
+  stLast.heapKb = m.heapKb; stLast.psramKb = m.psramKb; stLast.timeSource = m.timeSource; stLast.sdReady = m.sdReady; stLast.sdFreeMb = m.sdFreeMb;
   if (mode == M_STATUS) refreshStatus();
+  mapview_update(m);
   if (mode == M_SIGNAL && sigStatus && (sig_version() != sigShownVersion || sig_pending())) {
     sigShownVersion = sig_version();
     refreshSignal();
@@ -1617,6 +1789,8 @@ void ui_nav(int dx, int dy) {
       listHighlight();
       lv_obj_scroll_to_y(listBox, max(0, listSel * 38 - 76), LV_ANIM_OFF);
     }
+  } else if (mode == M_MAP) {
+    mapview_pan(dx * 48, dy * 48);
   } else if (mode == M_NODES && dy && nodesBox) {
     lv_obj_scroll_by(nodesBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_BRIGHT && dx && brightSlider) {
@@ -1627,6 +1801,7 @@ void ui_nav(int dx, int dy) {
 }
 
 void ui_click() {
+  if (quickOpen) { ui_activity(); closeQuick(true); return; }
   if (mode == M_LOCK) { ui_activity(); wake(); return; }
   ui_activity();
   if (mode == M_HOME) openApp(sel);
@@ -1634,6 +1809,7 @@ void ui_click() {
   else if (mode == M_THREAD) doSend();
   else if (mode == M_ENTRY) entrySave();
   else if (mode == M_SIGNAL) sigSend();
+  else if (mode == M_MAP) mapview_centre_on_me();
   else if ((mode == M_SETTINGS || mode == M_ADV || mode == M_PICK) && listN > 0) {
     if (mode == M_SETTINGS) settingsAct(listIds[listSel]);
     else if (mode == M_ADV) advAct(listIds[listSel]);
@@ -1649,6 +1825,7 @@ void ui_long() {
 
 void ui_key(char c) {
   ui_activity();
+  if (quickOpen) { closeQuick(true); return; }
   if (mode == M_LOCK) { wake(); return; }
   if (mode == M_HOME && (c == 'd' || c == 'D')) { openConsole(); return; }
   if (mode == M_THREAD && taInput) {
@@ -1659,6 +1836,13 @@ void ui_key(char c) {
       return;
     }
     if (c >= 32 && c < 127) lv_textarea_add_char(taInput, (uint32_t)c);
+    return;
+  }
+  if (mode == M_MAP) {
+    if (c == '+' || c == '=') { mapview_zoom(1); return; }
+    if (c == '-' || c == '_') { mapview_zoom(-1); return; }
+    if (c == 'c' || c == 'C') { mapview_centre_on_me(); return; }
+    if (c == 8 || c == 127) { goBack(); return; }
     return;
   }
   if (mode == M_ENTRY && taInput) {

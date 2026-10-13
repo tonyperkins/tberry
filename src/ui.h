@@ -22,6 +22,9 @@ struct UiModel {
   uint32_t heapKb = 0, psramKb = 0;
   uint8_t timeSource = 0;    // 0 none, 1 borrowed from the mesh, 2 GPS
   bool sdReady = false;
+  uint32_t sdFreeMb = 0;
+  bool hasPos = false;       // a current GPS position
+  int32_t latE6 = 0, lonE6 = 0;
   char consoleText[720] = {0};   // text shown by the debug console
 };
 

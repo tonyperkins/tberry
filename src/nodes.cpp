@@ -7,7 +7,8 @@ static int order[MAX_NODES];
 static bool orderDirty = true;
 static uint32_t version = 1;
 
-void nodes_seen(const uint8_t* key4, const char* name, uint8_t type, uint32_t ts, int rssi, float snr, int hops) {
+void nodes_seen(const uint8_t* key4, const char* name, uint8_t type, uint32_t ts, int rssi, float snr, int hops,
+                int32_t lat, int32_t lon) {
   int i = -1;
   for (int k = 0; k < count; k++) if (memcmp(table[k].key, key4, 4) == 0) { i = k; break; }
   if (i < 0) {
@@ -27,6 +28,7 @@ void nodes_seen(const uint8_t* key4, const char* name, uint8_t type, uint32_t ts
   if (ts) n.lastTs = ts;
   if (rssi) { n.rssi = (int16_t)rssi; n.snr4 = (int8_t)constrain((int)lroundf(snr * 4.0f), -128, 127); }
   if (hops >= 0) n.hops = (int8_t)hops;
+  if (lat || lon) { n.lat = lat; n.lon = lon; }
   orderDirty = true;
   version++;
 }
