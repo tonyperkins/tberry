@@ -18,6 +18,7 @@ struct Settings {
   uint8_t sf;              // spreading factor
   uint8_t cr;              // coding rate denominator (5..8)
   int8_t txPower;          // dBm
+  uint8_t volume;          // 0 (muted) to 100; added after the first release, so it is the last field
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults

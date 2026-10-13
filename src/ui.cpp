@@ -17,6 +17,7 @@
 #include "rangetest.h"
 #include "fonts/fonts.h"
 #include "emoji.h"
+#include "audio.h"
 
 extern TFT_eSPI tft;
 
@@ -81,6 +82,8 @@ static lv_obj_t* listBox;                // scrolling list used by Settings and 
 static int listN = 0, listSel = 0;
 static lv_obj_t *pinMsg, *pinDots[4];
 static lv_obj_t *brightSlider, *brightLbl;
+static int levelKind = 0;                // slider screen: 0 brightness, 1 volume
+static lv_obj_t *barGps, *barGpsX;
 static lv_obj_t *nodesBox;
 static lv_obj_t *stVal[6], *stSub[6], *stPill, *stPillLbl, *stNote;
 static UiModel stLast;                   // the latest model, for screens built after it arrived
@@ -591,7 +594,7 @@ static constexpr int ZONE_N = sizeof(zones) / sizeof(zones[0]);
 static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
 static constexpr int BW_N = 10;
 
-enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_BRIGHT, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
+enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_BRIGHT, ROW_VOLUME, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
 enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
@@ -812,35 +815,49 @@ static bool saveFreq(const char* t) {
 }
 
 // ── Brightness: a slider over the chip's 16 levels ───────────────
-static void brightApply(int level) {
-  level = constrain(level, 1, 16);
-  cfg().brightness = (uint8_t)level;
-  setBacklight(level);
-  settings_changed();
-  if (brightLbl) {
-    char b[16];
+static void brightApply(int v) {
+  char b[16];
+  if (levelKind == 0) {
+    int level = constrain(v, 1, 16);
+    cfg().brightness = (uint8_t)level;
+    setBacklight(level);
     snprintf(b, sizeof(b), "%d%%", level * 100 / 16);
-    lv_label_set_text(brightLbl, b);
+  } else {
+    int step = constrain(v, 0, 10);                       // eleven steps: muted, 10%, ... 100%
+    cfg().volume = (uint8_t)(step * 10);
+    audio_set_volume(cfg().volume);
+    if (step == 0) snprintf(b, sizeof(b), "Muted");
+    else snprintf(b, sizeof(b), "%d%%", step * 10);
   }
+  settings_changed();
+  if (brightLbl) lv_label_set_text(brightLbl, b);
 }
 static void brightCb(lv_event_t* e) {
   brightApply(lv_slider_get_value(lv_event_get_target(e)));
 }
+static void brightReleaseCb(lv_event_t*) {
+  if (levelKind == 1) audio_play(SND_BLIP);                // let the user hear the level they chose
+}
 
-static void openBrightness() {
+static void openLevel(int kind) {
   mode = M_BRIGHT;
   returnTo = M_SETTINGS;
+  levelKind = kind;
   lv_obj_t* s = newScreen();
-  headerFor(s, "Brightness");
+  headerFor(s, kind == 0 ? "Brightness" : "Volume");
   char b[16];
-  snprintf(b, sizeof(b), "%d%%", cfg().brightness * 100 / 16);
+  int lo = kind == 0 ? 1 : 0, hi = kind == 0 ? 16 : 10;
+  int cur = kind == 0 ? cfg().brightness : cfg().volume / 10;
+  if (kind == 0) snprintf(b, sizeof(b), "%d%%", cur * 100 / 16);
+  else if (cur == 0) snprintf(b, sizeof(b), "Muted");
+  else snprintf(b, sizeof(b), "%d%%", cur * 10);
   brightLbl = label(s, b, &lv_font_montserrat_48, TEXT);
   lv_obj_align(brightLbl, LV_ALIGN_CENTER, 0, -20);
   brightSlider = lv_slider_create(s);
   lv_obj_set_size(brightSlider, 270, 18);
   lv_obj_align(brightSlider, LV_ALIGN_CENTER, 0, 44);
-  lv_slider_set_range(brightSlider, 1, 16);
-  lv_slider_set_value(brightSlider, cfg().brightness, LV_ANIM_OFF);
+  lv_slider_set_range(brightSlider, lo, hi);
+  lv_slider_set_value(brightSlider, cur, LV_ANIM_OFF);
   lv_obj_set_style_bg_color(brightSlider, C(RAISE2), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_bg_color(brightSlider, C(ACCENT), LV_PART_INDICATOR);
@@ -849,6 +866,7 @@ static void openBrightness() {
   lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_KNOB);
   lv_obj_set_style_pad_all(brightSlider, 6, LV_PART_KNOB);
   lv_obj_add_event_cb(brightSlider, brightCb, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(brightSlider, brightReleaseCb, LV_EVENT_RELEASED, nullptr);
   lv_obj_t* hint = label(s, "Drag the bar, or roll the trackball sideways", &font_tdos_12, MUTE);
   lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -14);
   loadApp(s);
@@ -889,6 +907,9 @@ static void fillSettings() {
   addRow("Daylight saving", c.dst ? "On" : "Off", ROW_DST, K_VALUE, c.dst);
   snprintf(b, sizeof(b), "%d%%", c.brightness * 100 / 16);
   addRow("Brightness", b, ROW_BRIGHT, K_NAV);
+  if (c.volume == 0) snprintf(b, sizeof(b), "Muted");
+  else snprintf(b, sizeof(b), "%d%%", c.volume);
+  addRow("Volume", b, ROW_VOLUME, K_NAV);
   int p = presetIndex();
   addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
   snprintf(b, sizeof(b), "%d%%", lastBatt);
@@ -1052,7 +1073,8 @@ static void settingsAct(int id) {
     case ROW_DST:
       c.dst = c.dst ? 0 : 1;
       break;
-    case ROW_BRIGHT: openBrightness(); return;
+    case ROW_BRIGHT: openLevel(0); return;
+    case ROW_VOLUME: openLevel(1); return;
     case ROW_ADV: openPin(); return;
     default: return;                                          // read-only rows
   }
@@ -1430,6 +1452,13 @@ static void quickBrightCb(lv_event_t* e) {
   setBacklight(v);
   settings_changed();
 }
+static void quickVolumeCb(lv_event_t* e) {
+  int v = constrain(lv_slider_get_value(lv_event_get_target(e)), 0, 10);
+  cfg().volume = (uint8_t)(v * 10);
+  audio_set_volume(cfg().volume);
+  settings_changed();
+}
+static void quickVolumeReleaseCb(lv_event_t*) { audio_play(SND_BLIP); }
 static void quickAdvertCb(lv_event_t*) {
   if (actions.advertise) actions.advertise();
   closeQuick();
@@ -1447,7 +1476,7 @@ static void openQuick() {
   lv_obj_set_pos(quickBackdrop, 0, 0);
   lv_obj_add_event_cb(quickBackdrop, quickBackdropCb, LV_EVENT_CLICKED, nullptr);
 
-  lv_obj_t* panel = box(quickBackdrop, 320, 128, RAISE, 0);
+  lv_obj_t* panel = box(quickBackdrop, 320, 156, RAISE, 0);
   lv_obj_set_pos(panel, 0, 22);
   lv_obj_t* title = label(panel, "Quick settings", &font_tdos_12, MUTE);
   lv_obj_set_pos(title, 12, 8);
@@ -1468,6 +1497,23 @@ static void openQuick() {
   lv_obj_set_style_pad_all(sl, 5, LV_PART_KNOB);
   lv_obj_add_event_cb(sl, quickBrightCb, LV_EVENT_VALUE_CHANGED, nullptr);
 
+  lv_obj_t* spk = label(panel, LV_SYMBOL_VOLUME_MAX, &font_tdos_14, TEXT);
+  lv_obj_set_pos(spk, 12, 60);
+  lv_obj_t* vs = lv_slider_create(panel);
+  lv_obj_set_size(vs, 250, 14);
+  lv_obj_set_pos(vs, 46, 64);
+  lv_slider_set_range(vs, 0, 10);
+  lv_slider_set_value(vs, cfg().volume / 10, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(vs, C(RAISE2), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(vs, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(vs, C(ACCENT), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(vs, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(vs, C(TEXT), LV_PART_KNOB);
+  lv_obj_set_style_bg_opa(vs, LV_OPA_COVER, LV_PART_KNOB);
+  lv_obj_set_style_pad_all(vs, 5, LV_PART_KNOB);
+  lv_obj_add_event_cb(vs, quickVolumeCb, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(vs, quickVolumeReleaseCb, LV_EVENT_RELEASED, nullptr);
+
   struct Btn { const char* text; const char* sym; lv_event_cb_t cb; };
   const Btn btns[3] = {
     { "Advert", LV_SYMBOL_UPLOAD, quickAdvertCb },
@@ -1476,7 +1522,7 @@ static void openQuick() {
   };
   for (int i = 0; i < 3; i++) {
     lv_obj_t* b = tappable(box(panel, 96, 52, RAISE2, 14));
-    lv_obj_set_pos(b, 10 + i * 104, 66);
+    lv_obj_set_pos(b, 10 + i * 104, 92);
     lv_obj_t* ic = label(b, btns[i].sym, &font_tdos_16, ACCENT);
     lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
     lv_obj_t* tx = label(b, btns[i].text, &font_tdos_12, TEXT);
@@ -1488,7 +1534,7 @@ static void openQuick() {
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, panel);
-  lv_anim_set_values(&a, -128, 22);
+  lv_anim_set_values(&a, -156, 22);
   lv_anim_set_time(&a, 160);
   lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
   lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
@@ -1519,6 +1565,12 @@ static void buildStatusBar() {
   lv_obj_align(barBatt, LV_ALIGN_RIGHT_MID, -8, 0);
   barSig = label(bar, LV_SYMBOL_WIFI, &font_tdos_12, MUTE);
   lv_obj_align_to(barSig, barBatt, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+  // GPS: grey with a cross while the module is silent, amber and pulsing while it searches,
+  // solid green once it has a position.
+  barGps = label(bar, LV_SYMBOL_GPS, &font_tdos_12, MUTE);
+  lv_obj_align_to(barGps, barSig, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+  barGpsX = label(bar, LV_SYMBOL_CLOSE, &font_tdos_12, BAD);
+  lv_obj_align_to(barGpsX, barGps, LV_ALIGN_CENTER, 0, 0);
 }
 
 static void buildLock() {
@@ -1716,6 +1768,15 @@ void ui_update(const UiModel& m) {
   lv_obj_set_style_text_color(barBatt, C(m.batteryPct <= 15 ? BAD : TEXT), 0);
   lv_obj_set_style_text_color(barSig, C(m.signalBars >= 3 ? GOOD : m.signalBars >= 1 ? ACCENT : MUTE), 0);
   lv_obj_align_to(barSig, barBatt, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+  {
+    bool pulse = (millis() / 500) % 2;
+    uint32_t col = m.gpsState == 2 ? GOOD : m.gpsState == 1 ? (pulse ? ACCENT : MUTE) : MUTE;
+    lv_obj_set_style_text_color(barGps, C(col), 0);
+    lv_obj_align_to(barGps, barSig, LV_ALIGN_OUT_LEFT_MID, -10, 0);
+    lv_obj_align_to(barGpsX, barGps, LV_ALIGN_CENTER, 0, 0);
+    if (m.gpsState == 0) lv_obj_clear_flag(barGpsX, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(barGpsX, LV_OBJ_FLAG_HIDDEN);
+  }
 
   if (m.unread > 0) snprintf(b, sizeof(b), "%d unread  -  %d nodes heard", m.unread, m.nodesHeard);
   else snprintf(b, sizeof(b), m.signalBars > 0 ? "Mesh connected  -  %d nodes heard" : "No mesh heard yet", m.nodesHeard);
@@ -1794,7 +1855,7 @@ void ui_nav(int dx, int dy) {
   } else if (mode == M_NODES && dy && nodesBox) {
     lv_obj_scroll_by(nodesBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_BRIGHT && dx && brightSlider) {
-    int v = constrain(lv_slider_get_value(brightSlider) + dx, 1, 16);
+    int v = constrain(lv_slider_get_value(brightSlider) + dx, levelKind == 0 ? 1 : 0, levelKind == 0 ? 16 : 10);
     lv_slider_set_value(brightSlider, v, LV_ANIM_OFF);
     brightApply(v);
   }

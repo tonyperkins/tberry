@@ -29,6 +29,7 @@
 #include "messages.h"
 #include "settings.h"
 #include "storage.h"
+#include "audio.h"
 #include "nodes.h"
 #include "rangetest.h"
 
@@ -188,6 +189,7 @@ protected:
         msgs_set_status(p.conv, p.msgId, MS_DELIVERED, (uint16_t)min<uint32_t>(65535, max<uint32_t>(1, rtt / 100)));
         chatPush("  delivered (%lu ms)", (unsigned long)rtt);
         if (p.test) finishTest(p.conv, true, rtt);
+        else audio_play(SND_DELIVERED);
         p.ack = 0;                       // the same ACK can arrive more than once
         break;
       }
@@ -200,6 +202,7 @@ protected:
                (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), -1);
     int conv = msgs_ensure(from.id.pub_key, from.name, false);
     msgs_add(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED);
+    audio_play(SND_RECEIVE);                // direct messages only: the public channel is too chatty to chime
     chatPush("%s: %s", from.name, text);
     logf("DM from %s (%s): %s\n", from.name, pkt->isRouteDirect() ? "direct" : "flood", text);
   }
@@ -235,6 +238,7 @@ protected:
     }
     sig_finish(r);
     storage_log_signal(r.ts, r.name, ok, rttMs, r.hops, r.rssi, r.snr4 / 4.0f);
+    if (ok) audio_play(SND_TEST_OK);
   }
 
   void onSendTimeout() override {
@@ -244,6 +248,7 @@ protected:
     if (oldest) {
       msgs_set_status(oldest->conv, oldest->msgId, MS_FAILED);
       if (oldest->test) finishTest(oldest->conv, false, millis() - oldest->sentMs);
+      audio_play(SND_FAILED);
       oldest->ack = 0;
     }
     chatPush("  no ack (timed out)");
@@ -332,6 +337,7 @@ public:
     int r = sendMessage(*ci, now, 0, text, ack, est);
     if (r == MSG_SEND_FAILED) { msgs_set_status(conv, id, MS_FAILED); return false; }
     msgs_set_status(conv, id, MS_SENT);
+    audio_play(SND_SENT);
     for (auto& p : _pending) {
       if (!p.ack) { p = { ack, conv, id, millis(), isTest }; return true; }
     }
@@ -360,12 +366,14 @@ static uint32_t loopRecentShown = 0;  // the previous minute's value, which is w
 static bool gpsFix = false;
 static uint32_t gpsFixMs = 0;
 static int32_t gpsLatE6 = 0, gpsLonE6 = 0;      // last position, micro-degrees
+static uint32_t gpsByteMs = 0;                   // when the module last sent anything at all
 static void pollGps() {
   static char line[96];
   static int n = 0;
   int budget = 128;
   while (Serial1.available() && budget-- > 0) {
     char c = Serial1.read();
+    gpsByteMs = millis();
     if (c == '\n' || c == '\r') {
       if (n > 6 && line[0] == '$' && (memcmp(line + 3, "RMC", 3) == 0)) {
         line[n] = 0;
@@ -391,6 +399,7 @@ static void pollGps() {
             gpsLonE6 = (int32_t)lround(lon * 1e6);
           }
           if (epoch > 1700000000L) {
+            if (!gpsFix) audio_play(SND_GPS_LOCK);
             gpsFix = true; gpsFixMs = millis();
             int32_t diff = (int32_t)(epoch - (time_t)rtc.getCurrentTime());
             if (diff > 2 || diff < -2) rtc.setCurrentTime((uint32_t)epoch);
@@ -466,6 +475,11 @@ static void buildModel(UiModel& m) {
   m.nodesHeard = theMesh ? theMesh->getNumContacts() : 0;
   m.unread = msgs_unread_total();
   m.batteryMv = mv;
+  {
+    static bool warned = false;      // one warning per discharge, re-armed once recharged
+    if (m.batteryPct <= 15 && !m.charging && !warned) { warned = true; audio_play(SND_LOW_BATTERY); }
+    if (m.batteryPct >= 25 || m.charging) warned = false;
+  }
   m.uptimeSec = millis() / 1000;
   m.packetsRx = radio_driver.getPacketsRecv();
   m.packetsTx = radio_driver.getPacketsSent();
@@ -477,6 +491,7 @@ static void buildModel(UiModel& m) {
   m.timeSource = gpsFix ? 2 : (m.clockValid ? 1 : 0);
   m.sdReady = storage_ready();
   m.hasPos = gpsFix && (gpsLatE6 || gpsLonE6);
+  m.gpsState = gpsFix ? 2 : (gpsByteMs && millis() - gpsByteMs < 5000 ? 1 : 0);
   m.latE6 = gpsLatE6;
   m.lonE6 = gpsLonE6;
   m.sdFreeMb = storage_free_mb();
@@ -548,6 +563,8 @@ void setup() {
   settings_begin(SPIFFS);
   msgs_init();
   storage_begin(TFT_eSPI::getSPIinstance(), PIN_SD_CS);   // message history; fine if no card
+  audio_begin();
+  audio_set_volume(cfg().volume);
   ui_init();
   ui_set_actions(uiActions);
   ui_set_send_handler([](int conv, const char* text) { return theMesh && theMesh->sendConv(conv, text); });
@@ -570,6 +587,7 @@ void setup() {
     storage_load_messages();            // conversations now exist: restore their history
     theMesh->advertise(1200);
     chatPush("%s ready, advert sent", theMesh->name);
+    audio_play(SND_BOOT);
   } else {
     chatPush("radio init failed");
   }

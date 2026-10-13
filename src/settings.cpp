@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 static constexpr uint32_t MAGIC = 0x53444F54;   // "TODS"
-static constexpr uint16_t VERSION = 2;
+static constexpr uint16_t VERSION = 3;     // 2 -> 3: added volume
 static constexpr const char* PATH = "/settings";
 
 static Settings s;
@@ -23,6 +23,7 @@ static void applyDefaults() {
   s.sf = 7;
   s.cr = 5;
   s.txPower = 22;
+  s.volume = 60;
 }
 
 void settings_begin(fs::FS& fs) {
@@ -31,8 +32,14 @@ void settings_begin(fs::FS& fs) {
   if (!fs.exists(PATH)) return;
   File f = fs.open(PATH);
   if (!f) return;
-  Settings tmp;
-  if (f.read((uint8_t*)&tmp, sizeof(tmp)) == sizeof(tmp) && tmp.magic == MAGIC && tmp.version == VERSION) s = tmp;
+  // Version 2 files predate volume. The new field sits in what used to be padding, so it would
+  // read as 0 (muted): migrate by keeping everything else and using the default volume.
+  Settings tmp = s;
+  size_t got = f.read((uint8_t*)&tmp, sizeof(tmp));
+  if (got >= offsetof(Settings, volume) && tmp.magic == MAGIC) {
+    if (tmp.version == 2) { tmp.volume = s.volume; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == VERSION) s = tmp;
+  }
   f.close();
 }
 

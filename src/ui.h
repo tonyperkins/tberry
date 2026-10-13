@@ -24,6 +24,7 @@ struct UiModel {
   bool sdReady = false;
   uint32_t sdFreeMb = 0;
   bool hasPos = false;       // a current GPS position
+  uint8_t gpsState = 0;      // 0 no data from the module, 1 searching, 2 position fix
   int32_t latE6 = 0, lonE6 = 0;
   char consoleText[720] = {0};   // text shown by the debug console
 };
