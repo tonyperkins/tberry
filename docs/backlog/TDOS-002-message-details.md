@@ -37,6 +37,21 @@ Everything marked * needs new capture work; the rest comes from TDOS-001.
 - The path is only stored per message if we keep up to 8 hashes with it (about 24 bytes): decide
   whether to keep it on SD only or in RAM too.
 
-## Open questions
-- You mentioned metrics seen in other apps. Which ones did you want? I have listed the ones I know of
-  from MeshCore and MeshDesk; please add or strike any.
+## Notes from the sample
+- The apps shown flag a message with a small clock-and-question mark when its **timestamp looks
+  unreliable** (the sender's clock disagrees with ours). That is the "delay or clock skew" field
+  above, shown as a flag: add it to the inline line when the skew is large (suggest > 10 minutes).
+- **Path accuracy is limited.** A path is a list of repeater hashes, and at the default size of one
+  byte there are only 256 values for hundreds of repeaters, so several repeaters share each hash.
+  Someone in the sample said exactly this ("probably somewhat screwed due to 1 byte stuff").
+  Live-map services such as scope.digitaino.com reconstruct routes from reports by many observer
+  nodes plus known repeater positions; a single handset cannot disambiguate the same way. We should
+  show the path as hashes, name a repeater only when one known repeater matches, and mark
+  ambiguous ones. Larger hash sizes (2 or 3 bytes) remove most of the ambiguity, and
+  `Packet::getPathHashSize()` tells us which one a packet used.
+- Bots on the channel answer "test" messages with the hop count they saw
+  (`ACK | Path: 22 hops`, `Copy in Crestview FL ... 11 hops`). That is useful ground truth to compare
+  against our own hop count.
+
+## Decisions
+- No further metrics wanted beyond those listed.

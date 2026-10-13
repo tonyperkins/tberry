@@ -9,6 +9,7 @@ One file per ticket. Status values: `open`, `in progress`, `done`. Edit the file
 | [TDOS-003](TDOS-003-tap-to-reply-mention.md) | Tap a channel message to insert an `@[Name]` reply mention | feature | open |
 | [TDOS-004](TDOS-004-show-message-on-map.md) | Show a message's origin on the map | feature | open |
 | [TDOS-005](TDOS-005-gps-data-validity.md) | GPS tiles show impossible values without a real fix | bug | open |
+| [TDOS-006](TDOS-006-highlight-mentions-of-me.md) | Highlight and chime for messages that mention me | feature | open |
 
 Background for all of them: the radio hands every message callback the whole `mesh::Packet`, so hop
 count, route type, path, SNR and payload size are available at the moment a message arrives. The

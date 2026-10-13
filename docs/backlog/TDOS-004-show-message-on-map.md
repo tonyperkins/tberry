@@ -6,13 +6,21 @@
 If a message came from somewhere, seeing where on the map is the quickest way to judge range and
 whether a repeater or a person is out of the area.
 
-## What "has a location" could mean (needs a decision)
-- **A. The sender advertises a position.** MeshCore adverts carry latitude and longitude, which we
-  already record per node. Any message from a node we know the position of qualifies.
-- **B. The message text contains coordinates** (for example `30.2672, -97.7431`, a `geo:` link, or a
-  map URL). Some apps send these as a manual check-in.
+## What "has a location" means (decided)
+**Option A.** A MeshCore message does not carry coordinates. A node that has GPS (or a configured
+fixed position) and has "share location" enabled puts its latitude and longitude in its **advert**.
+Apps join the two: a message from a node whose advert had a position gets a location marker.
 
-Option A needs no new parsing. Option B needs a small coordinate detector. Both can be supported.
+The sample confirms this. Most messages show a small crosshair mark after the hop count
+(`8 hops ⌖ · SNR 0.5`); a few do not (`24 hops · SNR 2`, `direct · SNR 11.25`), and those are
+nodes that do not advertise a position. Our own node advertises no position (privacy default), so
+other people's apps show no crosshair on our messages.
+
+Coordinates typed into message text (option B) are not part of the convention and are out of scope.
+
+## How other apps present it
+- The crosshair mark sits on the same line as hops and SNR, and is the control that opens the map.
+- Every message line follows `N hops ⌖ · SNR x.xx · 6:22 AM`; one hop is "1 hop", zero is "direct".
 
 ## Behaviour
 1. A bubble whose origin has a position shows a small pin icon beside its time line.
@@ -37,6 +45,5 @@ Option A needs no new parsing. Option B needs a small coordinate detector. Both 
 - Privacy: this only displays positions other nodes chose to broadcast.
 
 ## Open questions
-1. Option A, B, or both?
-2. Should the map also draw the **route** (the repeaters from TDOS-002 that have positions) as a line
-   from the sender to us? It is a natural extension and the data will be there.
+- Should the map also draw the **route** (the repeaters from TDOS-002 that have positions) as a line
+  from the sender to us? A natural extension, but see the path-accuracy caveat in TDOS-002.
