@@ -142,7 +142,8 @@ void emoji_filter(const char* src, char* dst, size_t n, bool keepAvailable) {
     }
     bool keep = !isEmojiRange(cp) || (keepAvailable && hasImage(cp));
     if (keep) {
-      for (int k = 0; k < len && src[i + k] && o + 1 < n; k++) dst[o++] = src[i + k];
+      if (o + len >= n) break;                     // no room for the whole character: stop, don't cut it
+      for (int k = 0; k < len && src[i + k]; k++) dst[o++] = src[i + k];
     }
     i += len;
   }

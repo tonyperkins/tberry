@@ -487,7 +487,7 @@ static bool sameName(const char* mention, const char* rawSender) {
 // The message a reply at index `i` is answering: the latest earlier message from the person it
 // mentions (or from us, when someone has mentioned this node), skipping reactions.
 static int findParent(int conv, int i, const char* mentioned) {
-  bool aboutUs = lastName[0] && strcmp(mentioned, lastName) == 0;
+  bool aboutUs = lastName[0] && sameName(mentioned, lastName);
   for (int j = i - 1; j >= 0 && j >= i - 80; j--) {
     const Msg* p = msgs_at(conv, j);
     if (!p) break;
@@ -571,7 +571,7 @@ static void buildThread() {
     if (c->channel && !m->out && parseReaction(m->text, rAuthor, sizeof(rAuthor), rEmoji, sizeof(rEmoji), rCode, sizeof(rCode))) {
       char raw[160], shown[160];
       const char* who = m->sender[0] ? m->sender : "Someone";
-      bool toMe = lastName[0] && strcmp(rAuthor, lastName) == 0;
+      bool toMe = lastName[0] && sameName(rAuthor, lastName);
       snprintf(raw, sizeof(raw), "%s reacted %s to %s", who, rEmoji, toMe ? "you" : rAuthor);
       emoji_filter(raw, shown, sizeof(shown), true);   // the emoji if the pack has it, else just the words
       lv_obj_t* rl = label(thrBox, shown, emoji_font(&font_tdos_12), toMe ? ACCENT : MUTE);

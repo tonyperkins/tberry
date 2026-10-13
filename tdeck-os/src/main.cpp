@@ -105,6 +105,7 @@ class DeckMesh : public BaseChatMesh {
   fs::FS* _fs = nullptr;
   struct Pending { uint32_t ack; int conv; uint32_t msgId; uint32_t sentMs; bool test; };
   static constexpr int MAX_PENDING = 6;
+  static constexpr uint32_t ACK_WAIT_MS = 60000;   // longer than MeshCore's own timeout for a routed message
   Pending _pending[MAX_PENDING] = {};
   int _pubConv = -1;
   ChannelDetails* _public = nullptr;
@@ -355,6 +356,15 @@ public:
 
   // Writing the contact file takes ~0.5 s of flash time, so batch it instead of saving per advert.
   void tick() {
+    // MeshCore keeps a single timeout for the latest send, so earlier messages that never get an
+    // ACK would hold their slot for ever: expire them here.
+    for (auto& p : _pending) {
+      if (p.ack && millis() - p.sentMs > ACK_WAIT_MS) {
+        msgs_set_status(p.conv, p.msgId, MS_FAILED);
+        if (p.test) finishTest(p.conv, false, millis() - p.sentMs);
+        p.ack = 0;
+      }
+    }
     if (_dirty && millis() - _lastSaveMs > 15000) {
       saveContacts();
       nodes_positions_save(*_fs);
@@ -529,7 +539,12 @@ static void handleNmea(char* line, int n) {
   if (!gpsRunning) return;                       // stopped: whatever it still prints is not data
   line[n] = 0;
   char* star = strchr(line, '*');
-  if (star) *star = 0;
+  if (!star || !isxdigit((uint8_t)star[1]) || !isxdigit((uint8_t)star[2])) return;   // truncated or noisy line
+  uint8_t sum = 0;
+  for (const char* q = line + 1; q < star; q++) sum ^= (uint8_t)*q;
+  char hex[3] = { star[1], star[2], 0 };
+  if (sum != (uint8_t)strtoul(hex, nullptr, 16)) return;   // corrupted: never trust it for time or position
+  *star = 0;
   char* f[24];
   int nf = 0;
   char* p = line;

@@ -14,7 +14,7 @@ Bounding box: S 28.822, N 31.713, W -99.417, E -96.069.
 ## Rebuilding
 
 ```sh
-./build_vectors.sh                       # ~5 min, downloads ~2 GB the first time
+./build_vectors.sh                       # ~5 min, downloads ~2 GB the first time   # writes data/austin.mbtiles; must exist before docker run
 python3 prepare_style.py                 # adapts + brightens the Dark Matter style
 docker run -d --name tdeck-tiles -p 8080:8080 \
   -v "$PWD/server":/data -v "$PWD/data/austin.mbtiles":/data/austin.mbtiles:ro \

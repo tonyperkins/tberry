@@ -224,7 +224,9 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
   File f = SD.open("/tdos/signal.csv", FILE_APPEND);
   if (!f) return;
   if (fresh) f.println("utc,node,result,rtt_ms,hops,rssi_dbm,snr_db");
-  f.printf("%lu,%s,%s,%lu,%d,%d,%.1f\n", (unsigned long)ts, name, ok ? "ok" : "timeout", (unsigned long)rttMs, hops, rssi, snr);
+  f.printf("%lu,\"", (unsigned long)ts);
+  for (const char* q = name; *q; q++) { if (*q == '"') f.write('"'); f.write((uint8_t)*q); }   // names may hold commas and quotes
+  f.printf("\",%s,%lu,%d,%d,%.1f\n", ok ? "ok" : "timeout", (unsigned long)rttMs, hops, rssi, snr);
   f.close();
 }
 
