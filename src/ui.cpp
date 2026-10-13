@@ -11,11 +11,11 @@
 #include <time.h>
 #include "ui.h"
 #include "messages.h"
+#include "settings.h"
+#include "fonts/fonts.h"
 
 extern TFT_eSPI tft;
 
-// Austin is UTC-5 in daylight time. This becomes a setting in the Settings app.
-static constexpr int32_t TZ_OFFSET_SEC = -5 * 3600;
 static constexpr uint32_t IDLE_LOCK_MS = 60000;
 static constexpr int PIN_BACKLIGHT = 42;
 
@@ -59,7 +59,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -71,6 +71,22 @@ static lv_obj_t *lockTime, *lockDate, *lockMesh;
 static lv_obj_t *tiles[6], *badge, *badgeLbl;
 static lv_obj_t *dbgLabel, *convBox, *thrBox, *taInput;
 static lv_group_t* inputGroup = nullptr;   // gives the message box the focus state that shows its cursor
+static lv_obj_t* listBox;                // scrolling list used by Settings and Advanced
+static int listN = 0, listSel = 0;
+static lv_obj_t *pinMsg, *pinDots[4];
+static lv_obj_t *brightSlider, *brightLbl;
+static Mode returnTo = M_SETTINGS;       // where Back from a picker, entry or slider goes
+static char pickBuf[24][28];
+static int pickN = 0, pickCur = 0;
+static void (*pickCb)(int) = nullptr;
+static bool (*entryCb)(const char*) = nullptr;
+static bool entryNumeric = false;
+static char pinBuf[8], pinFirst[8];
+static int pinLen = 0, pinStage = 0;     // 0 enter, 1 choose, 2 confirm
+static bool resetArmed = false;
+static int lastBatt = 0;
+static char lastName[32];
+static UiActions actions = {};
 static int sel = 0;                      // 0..5, the highlighted home tile
 static int convSel = 0;                  // highlighted row in the conversation list
 static int convOrder[MAX_CONVS], convN = 0;
@@ -115,6 +131,11 @@ static lv_obj_t* box(lv_obj_t* parent, int w, int h, uint32_t col, int radius) {
     lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
   }
   lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);     // decoration never takes the tap away from its row
+  return o;
+}
+static lv_obj_t* tappable(lv_obj_t* o) {
+  lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
   return o;
 }
 static lv_obj_t* label(lv_obj_t* parent, const char* txt, const lv_font_t* font, uint32_t col) {
@@ -124,17 +145,36 @@ static lv_obj_t* label(lv_obj_t* parent, const char* txt, const lv_font_t* font,
   lv_obj_set_style_text_color(l, C(col), 0);
   return l;
 }
-static void setBacklight(int pct) {
-  static bool attached = false;
-  if (!attached) {
-    ledcSetup(0, 5000, 8);
-    ledcAttachPin(PIN_BACKLIGHT, 0);
-    attached = true;
+// The T-Deck backlight is an LED driver with a single-wire, pulse-counting interface: each low
+// pulse steps the level down (wrapping around), 16 levels. It is not a PWM input, so driving it
+// with PWM makes the brightness jump around.
+static uint8_t blLevel = 0;              // level the chip is at; 0 = off
+static void setBacklight(int level) {
+  const int steps = 16;
+  level = constrain(level, 0, steps);
+  if (level == blLevel) return;
+  if (level == 0) {
+    digitalWrite(PIN_BACKLIGHT, LOW);
+    delay(3);
+    blLevel = 0;
+    return;
   }
-  ledcWrite(0, (uint32_t)(pct * 255 / 100));
+  if (blLevel == 0) {                    // off -> on: the chip comes up at full brightness
+    pinMode(PIN_BACKLIGHT, OUTPUT);
+    digitalWrite(PIN_BACKLIGHT, HIGH);
+    blLevel = steps;
+    delayMicroseconds(30);
+  }
+  int from = steps - blLevel, to = steps - level;
+  int pulses = (steps + to - from) % steps;
+  for (int i = 0; i < pulses; i++) {
+    digitalWrite(PIN_BACKLIGHT, LOW);
+    digitalWrite(PIN_BACKLIGHT, HIGH);
+  }
+  blLevel = level;
 }
 static void localTime(uint32_t utc, struct tm& out) {
-  time_t t = (time_t)utc + TZ_OFFSET_SEC;
+  time_t t = (time_t)utc + ((int32_t)cfg().tzMinutes + (cfg().dst ? 60 : 0)) * 60;
   gmtime_r(&t, &out);
 }
 static uint32_t avatarColor(const char* name) {
@@ -157,12 +197,14 @@ static void setSel(int i) {
 
 static void releaseApp() {            // forget pointers into the app screen before it goes away
   dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr;
+  listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
+  brightSlider = nullptr; brightLbl = nullptr;
   curConv = -1;
   msgs_set_open(-1);
 }
 
 static void wake() {
-  setBacklight(100);
+  setBacklight(cfg().brightness);
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
   showHome();
 }
@@ -174,7 +216,7 @@ static void goLock() {
   lv_scr_load(scrLock);                 // immediate, no animation: the old screen is idle now
   if (old && old == scrApp) { lv_obj_del(old); scrApp = nullptr; }
   releaseApp();
-  setBacklight(25);
+  setBacklight(min<int>(4, cfg().brightness));      // dimmed: about 25 percent
 }
 
 static void showHome() {
@@ -201,18 +243,25 @@ static void loadApp(lv_obj_t* s) {
 static void backCb(lv_event_t*) { goBack(); }
 static void tileCb(lv_event_t* e) { openApp((int)(intptr_t)lv_event_get_user_data(e)); }
 
+static void openSettings();
+static void openAdvanced();
 static void goBack() {
   if (mode == M_THREAD) { openConvs(); return; }
+  if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
+    if (returnTo == M_ADV) openAdvanced(); else openSettings();
+    return;
+  }
+  if (mode == M_PIN || mode == M_ADV) { openSettings(); return; }
   showHome();
 }
 
 static lv_obj_t* headerFor(lv_obj_t* scr, const char* title) {
-  lv_obj_t* back = box(scr, 40, 28, RAISE, 10);
+  lv_obj_t* back = tappable(box(scr, 40, 28, RAISE, 10));
   lv_obj_set_pos(back, 6, 26);
-  lv_obj_t* l = label(back, LV_SYMBOL_LEFT, &lv_font_montserrat_14, TEXT);
+  lv_obj_t* l = label(back, LV_SYMBOL_LEFT, &font_tdos_14, TEXT);
   lv_obj_center(l);
   lv_obj_add_event_cb(back, backCb, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t* t = label(scr, title, &lv_font_montserrat_20, TEXT);
+  lv_obj_t* t = label(scr, title, &font_tdos_20, TEXT);
   lv_obj_set_pos(t, 54, 28);
   return back;
 }
@@ -221,14 +270,15 @@ static lv_obj_t* headerFor(lv_obj_t* scr, const char* title) {
 static void openApp(int i) {
   if (i < 0 || i > 5) return;
   if (i == 0) { openConvs(); return; }
+  if (i == 5) { openSettings(); return; }
   mode = M_APP;
   lv_obj_t* s = newScreen();
   headerFor(s, apps[i].name);
   lv_obj_t* sym = label(s, apps[i].sym, &lv_font_montserrat_48, apps[i].col);
   lv_obj_align(sym, LV_ALIGN_CENTER, 0, -18);
-  lv_obj_t* t = label(s, "Coming soon", &lv_font_montserrat_20, TEXT);
+  lv_obj_t* t = label(s, "Coming soon", &font_tdos_20, TEXT);
   lv_obj_align(t, LV_ALIGN_CENTER, 0, 34);
-  lv_obj_t* b = label(s, apps[i].blurb, &lv_font_montserrat_12, MUTE);
+  lv_obj_t* b = label(s, apps[i].blurb, &font_tdos_12, MUTE);
   lv_obj_set_style_text_align(b, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_align(b, LV_ALIGN_CENTER, 0, 70);
   loadApp(s);
@@ -237,7 +287,7 @@ static void openApp(int i) {
 static void openConsole() {
   mode = M_DBG;
   lv_obj_t* s = newScreen();
-  dbgLabel = label(s, "", &lv_font_montserrat_12, TEXT);
+  dbgLabel = label(s, "", &font_tdos_12, TEXT);
   lv_obj_set_pos(dbgLabel, 4, 24);
   lv_obj_set_width(dbgLabel, 312);
   lv_label_set_long_mode(dbgLabel, LV_LABEL_LONG_CLIP);
@@ -254,28 +304,28 @@ static void fillConvs() {
   convN = msgs_sorted(convOrder, MAX_CONVS);
   if (convSel >= convN) convSel = max(0, convN - 1);
   if (convN == 0) {
-    lv_obj_t* t = label(convBox, "No conversations yet.\nPeople appear when they\nadvertise on the mesh.", &lv_font_montserrat_14, MUTE);
+    lv_obj_t* t = label(convBox, "No conversations yet.\nPeople appear when they\nadvertise on the mesh.", &font_tdos_14, MUTE);
     lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(t, LV_ALIGN_CENTER, 0, 10);
     return;
   }
   for (int r = 0; r < convN; r++) {
     const Conv* c = msgs_conv(convOrder[r]);
-    lv_obj_t* row = box(convBox, 312, 46, r == convSel ? RAISE2 : RAISE, 12);
+    lv_obj_t* row = tappable(box(convBox, 312, 46, r == convSel ? RAISE2 : RAISE, 12));
     lv_obj_set_pos(row, 4, r * 50);
     lv_obj_add_event_cb(row, convRowCb, LV_EVENT_CLICKED, (void*)(intptr_t)convOrder[r]);
     uint32_t col = c->channel ? BLUE : avatarColor(c->name);
     lv_obj_t* av = box(row, 30, 30, col, 15);
     lv_obj_set_pos(av, 8, 8);
     char ini[2] = { c->channel ? '#' : (char)toupper((unsigned char)c->name[0]), 0 };
-    lv_obj_t* il = label(av, ini[0] ? ini : "?", &lv_font_montserrat_14, INK);
+    lv_obj_t* il = label(av, ini[0] ? ini : "?", &font_tdos_14, INK);
     lv_obj_center(il);
-    lv_obj_t* n = label(row, c->name[0] ? c->name : "(unnamed)", &lv_font_montserrat_14, TEXT);
+    lv_obj_t* n = label(row, c->name[0] ? c->name : "(unnamed)", &font_tdos_14, TEXT);
     lv_obj_set_pos(n, 46, 5);
     lv_obj_set_width(n, 190);
     lv_label_set_long_mode(n, LV_LABEL_LONG_CLIP);
     const Msg* last = c->count ? msgs_at(convOrder[r], c->count - 1) : nullptr;
-    lv_obj_t* p = label(row, last ? last->text : "No messages yet", &lv_font_montserrat_12, MUTE);
+    lv_obj_t* p = label(row, last ? last->text : "No messages yet", &font_tdos_12, MUTE);
     lv_obj_set_pos(p, 46, 25);
     lv_obj_set_width(p, 200);
     lv_label_set_long_mode(p, LV_LABEL_LONG_CLIP);
@@ -284,7 +334,7 @@ static void fillConvs() {
       lv_obj_set_pos(d, 282, 12);
       char u[8];
       snprintf(u, sizeof(u), "%d", c->unread > 99 ? 99 : c->unread);
-      lv_obj_t* ul = label(d, u, &lv_font_montserrat_12, INK);
+      lv_obj_t* ul = label(d, u, &font_tdos_12, INK);
       lv_obj_center(ul);
     }
   }
@@ -340,14 +390,18 @@ static void buildThread() {
     lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
 
-    lv_obj_t* t = label(b, m->text, &lv_font_montserrat_14, m->out ? 0x06101F : TEXT);
-    lv_obj_set_style_max_width(t, 214, 0);
+    lv_obj_t* t = label(b, m->text, &font_tdos_14, m->out ? 0x06101F : TEXT);
+    // A content-sized label never wraps by itself: measure it, and if it is too wide give it a
+    // fixed width so LVGL wraps it onto more lines.
+    lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+    lv_obj_update_layout(t);
+    if (lv_obj_get_width(t) > 214) lv_obj_set_width(t, 214);
     if (m->out) {
       const char* st = m->status == MS_DELIVERED ? LV_SYMBOL_OK LV_SYMBOL_OK
                      : m->status == MS_SENT ? LV_SYMBOL_OK
                      : m->status == MS_FAILED ? LV_SYMBOL_WARNING " not delivered"
                      : "sending...";
-      lv_obj_t* s = label(b, st, &lv_font_montserrat_12, 0x06101F);
+      lv_obj_t* s = label(b, st, &font_tdos_12, 0x06101F);
       lv_obj_set_style_align(s, LV_ALIGN_RIGHT_MID, 0);
     }
   }
@@ -395,7 +449,7 @@ static void openThread(int conv) {
   lv_obj_set_style_bg_color(taInput, C(RAISE), 0);
   lv_obj_set_style_bg_opa(taInput, LV_OPA_COVER, 0);
   lv_obj_set_style_text_color(taInput, C(TEXT), 0);
-  lv_obj_set_style_text_font(taInput, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_font(taInput, &font_tdos_16, 0);
   lv_obj_set_style_pad_hor(taInput, 10, 0);
   lv_obj_set_style_pad_ver(taInput, 6, 0);
   lv_obj_set_style_border_color(taInput, C(LINE), 0);
@@ -414,9 +468,9 @@ static void openThread(int conv) {
   lv_group_add_obj(inputGroup, taInput);
   lv_group_focus_obj(taInput);
 
-  lv_obj_t* send = box(s, 52, 52, ACCENT, 16);
+  lv_obj_t* send = tappable(box(s, 52, 52, ACCENT, 16));
   lv_obj_set_pos(send, 262, 240 - 56);
-  lv_obj_t* sl = label(send, LV_SYMBOL_RIGHT, &lv_font_montserrat_20, INK);
+  lv_obj_t* sl = label(send, LV_SYMBOL_RIGHT, &font_tdos_20, INK);
   lv_obj_center(sl);
   lv_obj_add_event_cb(send, sendCb, LV_EVENT_CLICKED, nullptr);
 
@@ -425,27 +479,601 @@ static void openThread(int conv) {
   loadApp(s);
 }
 
+
+// ── Toast: a short confirmation at the bottom of the screen ───────
+static lv_obj_t* toastObj = nullptr;
+static uint32_t toastGen = 0;
+
+static void toastDone(lv_timer_t* t) {
+  if ((uint32_t)(uintptr_t)t->user_data == toastGen && toastObj) {   // ignore timers of superseded toasts
+    lv_obj_del(toastObj);
+    toastObj = nullptr;
+  }
+}
+
+static void toast(const char* text) {
+  if (toastObj) { lv_obj_del(toastObj); toastObj = nullptr; }
+  toastObj = box(lv_layer_top(), 10, 30, RAISE2, 15);
+  lv_obj_set_style_border_width(toastObj, 1, 0);
+  lv_obj_set_style_border_color(toastObj, C(ACCENT), 0);
+  lv_obj_t* l = label(toastObj, text, &font_tdos_14, TEXT);
+  lv_obj_center(l);
+  lv_obj_update_layout(l);
+  lv_obj_set_width(toastObj, lv_obj_get_width(l) + 32);
+  lv_obj_align(toastObj, LV_ALIGN_BOTTOM_MID, 0, -14);
+  lv_obj_move_foreground(toastObj);
+  toastGen++;
+  lv_timer_t* t = lv_timer_create(toastDone, 1800, (void*)(uintptr_t)toastGen);
+  lv_timer_set_repeat_count(t, 1);
+}
+
+static void toast(const char* text);
+
+// ── Settings ─────────────────────────────────────────────────────
+struct Preset { const char* name; float freq, bw; uint8_t sf, cr; };
+static const Preset presets[] = {
+  { "US / Canada", 910.525f, 62.5f, 7, 5 },
+  { "EU / UK 868", 869.618f, 62.5f, 8, 5 },
+  { "Default 915", 915.0f, 250.0f, 10, 5 },
+};
+static constexpr int PRESET_N = 3;
+
+struct Zone { const char* name; int16_t minutes; };
+static const Zone zones[] = {
+  { "Hawaii", -600 }, { "Alaska", -540 }, { "Pacific", -480 }, { "Mountain", -420 }, { "Central", -360 },
+  { "Eastern", -300 }, { "Atlantic", -240 }, { "Newfoundland", -210 }, { "Brasilia", -180 },
+  { "UTC / Greenwich", 0 }, { "Central Europe", 60 }, { "Eastern Europe", 120 }, { "Moscow", 180 },
+  { "Gulf", 240 }, { "Pakistan", 300 }, { "India", 330 }, { "Bangladesh", 360 }, { "Thailand", 420 },
+  { "China / Singapore", 480 }, { "Japan / Korea", 540 }, { "Australia East", 600 }, { "New Zealand", 720 },
+};
+static constexpr int ZONE_N = sizeof(zones) / sizeof(zones[0]);
+static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
+static constexpr int BW_N = 10;
+
+enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_BRIGHT, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_RESET, AD_INFO };
+
+void ui_set_actions(const UiActions& a) { actions = a; }
+
+// Row kinds, so what you can do is visible at a glance:
+//   K_NAV    opens something (a list, a slider, a text box)   chevron on the right
+//   K_VALUE  a two-state setting you flip in place             amber chip
+//   K_BUTTON does something now                                amber pill
+//   K_INFO   read only                                         flat and dim, never highlighted
+enum RowKind { K_NAV, K_VALUE, K_BUTTON, K_INFO };
+static int listKind[24];
+static lv_obj_t* listRows[24];
+static int listIds[24];
+
+static void listHighlight() {
+  for (int i = 0; i < listN; i++) {
+    if (listKind[i] == K_INFO) continue;
+    lv_obj_set_style_bg_color(listRows[i], C(i == listSel ? RAISE2 : RAISE), 0);
+    lv_obj_set_style_border_width(listRows[i], i == listSel ? 2 : 0, 0);
+    lv_obj_set_style_border_color(listRows[i], C(ACCENT), 0);
+  }
+}
+static int nextSelectable(int from, int dir) {
+  for (int i = from + dir; i >= 0 && i < listN; i += dir)
+    if (listKind[i] != K_INFO) return i;
+  return from;
+}
+
+static void newListBox(lv_obj_t* scr) {
+  listBox = lv_obj_create(scr);
+  lv_obj_set_size(listBox, 320, 240 - 58);
+  lv_obj_set_pos(listBox, 0, 58);
+  lv_obj_set_style_bg_opa(listBox, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(listBox, 0, 0);
+  lv_obj_set_style_pad_all(listBox, 0, 0);
+  lv_obj_set_scrollbar_mode(listBox, LV_SCROLLBAR_MODE_OFF);
+  listN = 0;
+}
+
+static void settingsAct(int id);
+static void advAct(int id);
+static void pickChoose(int idx);
+
+static void listRowCb(lv_event_t* e) {
+  int id = (int)(intptr_t)lv_event_get_user_data(e);
+  for (int i = 0; i < listN; i++) if (listIds[i] == id) listSel = i;
+  if (mode == M_SETTINGS) settingsAct(id);
+  else if (mode == M_ADV) advAct(id);
+  else if (mode == M_PICK) pickChoose(id);
+}
+
+static lv_obj_t* addRow(const char* title, const char* value, int id, RowKind kind, bool on = false) {
+  if (listN >= 24) return nullptr;
+  bool info = kind == K_INFO;
+  lv_obj_t* r = box(listBox, 312, 34, info ? 0xFFFFFFFF : RAISE, 10);
+  lv_obj_set_pos(r, 4, listN * 38);
+  lv_obj_t* t = label(r, title, &font_tdos_14, info ? MUTE : TEXT);
+  lv_obj_align(t, LV_ALIGN_LEFT_MID, 10, 0);
+
+  if (kind == K_NAV) {
+    if (value && *value) {
+      lv_obj_t* v = label(r, value, &font_tdos_14, ACCENT);
+      lv_obj_align(v, LV_ALIGN_RIGHT_MID, -28, 0);
+    }
+    lv_obj_t* c = label(r, LV_SYMBOL_RIGHT, &font_tdos_14, TEXT);
+    lv_obj_align(c, LV_ALIGN_RIGHT_MID, -10, 0);
+  } else if (kind == K_VALUE) {
+    lv_obj_t* chip = box(r, 10, 24, on ? ACCENT : RAISE2, 12);
+    lv_obj_t* v = label(chip, value, &font_tdos_14, on ? INK : MUTE);
+    lv_obj_center(v);
+    lv_obj_update_layout(v);
+    lv_obj_set_width(chip, lv_obj_get_width(v) + 24);
+    lv_obj_align(chip, LV_ALIGN_RIGHT_MID, -6, 0);
+  } else if (kind == K_BUTTON) {
+    lv_obj_t* pill = box(r, 10, 24, ACCENT, 12);
+    lv_obj_t* v = label(pill, value && *value ? value : "Go", &font_tdos_14, INK);
+    lv_obj_center(v);
+    lv_obj_update_layout(v);
+    lv_obj_set_width(pill, lv_obj_get_width(v) + 24);
+    lv_obj_align(pill, LV_ALIGN_RIGHT_MID, -6, 0);
+  } else if (info && value && *value) {
+    lv_obj_t* v = label(r, value, &font_tdos_14, TEXT);
+    lv_obj_align(v, LV_ALIGN_RIGHT_MID, -10, 0);
+  }
+
+  if (!info) {
+    tappable(r);
+    lv_obj_add_event_cb(r, listRowCb, LV_EVENT_CLICKED, (void*)(intptr_t)id);
+  }
+  listRows[listN] = r;
+  listIds[listN] = id;
+  listKind[listN] = kind;
+  listN++;
+  return r;
+}
+
+static void fmtOffset(int minutes, char* out, size_t n) {
+  int a = abs(minutes);
+  if (a % 60) snprintf(out, n, "UTC%c%d:%02d", minutes < 0 ? '-' : '+', a / 60, a % 60);
+  else snprintf(out, n, "UTC%c%d", minutes < 0 ? '-' : '+', a / 60);
+}
+static int zoneIndex() {
+  for (int i = 0; i < ZONE_N; i++) if (zones[i].minutes == cfg().tzMinutes) return i;
+  return -1;
+}
+static int presetIndex() {
+  const Settings& c = cfg();
+  for (int i = 0; i < PRESET_N; i++)
+    if (fabsf(presets[i].freq - c.freq) < 0.0005f && presets[i].bw == c.bw && presets[i].sf == c.sf && presets[i].cr == c.cr) return i;
+  return -1;
+}
+
+// ── Picker: a scrollable list to choose one value from ───────────
+// The caller fills pickBuf[0..n), then calls openPicker. Choosing an entry runs cb(index), which
+// applies the value and makes exactly one screen change back.
+static void openPicker(const char* title, int n, int cur, void (*cb)(int), Mode ret) {
+  mode = M_PICK;
+  returnTo = ret;
+  pickN = n; pickCur = cur; pickCb = cb;
+  lv_obj_t* s = newScreen();
+  headerFor(s, title);
+  newListBox(s);
+  for (int i = 0; i < n; i++) {
+    lv_obj_t* r = addRow(pickBuf[i], "", i, K_NAV);
+    if (!r) break;
+    // replace the chevron with a check on the current choice
+    lv_obj_t* last = lv_obj_get_child(r, lv_obj_get_child_cnt(r) - 1);
+    if (i == cur) lv_label_set_text(last, LV_SYMBOL_OK);
+    else lv_label_set_text(last, "");
+  }
+  listSel = constrain(cur, 0, max(0, listN - 1));
+  listHighlight();
+  lv_obj_scroll_to_y(listBox, max(0, listSel * 38 - 76), LV_ANIM_OFF);
+  loadApp(s);
+}
+static void pickChoose(int idx) {
+  if (pickCb) pickCb(idx);
+}
+
+// ── Entry: a text box with Save and Cancel ───────────────────────
+static void entrySave() {
+  if (!taInput || !entryCb) return;
+  if (entryCb(lv_textarea_get_text(taInput))) { /* the callback navigates */ }
+}
+static void entrySaveCb(lv_event_t*) { entrySave(); }
+static void entryCancelCb(lv_event_t*) { goBack(); }
+
+static void openEntry(const char* title, const char* hint, const char* initial, int maxLen, bool numeric,
+                      bool (*cb)(const char*), Mode ret) {
+  mode = M_ENTRY;
+  returnTo = ret;
+  entryCb = cb;
+  entryNumeric = numeric;
+  lv_obj_t* s = newScreen();
+  headerFor(s, title);
+  lv_obj_t* h = label(s, hint, &font_tdos_12, MUTE);
+  lv_obj_set_pos(h, 12, 66);
+  lv_obj_set_width(h, 296);
+  taInput = lv_textarea_create(s);
+  lv_obj_set_size(taInput, 296, 44);
+  lv_obj_set_pos(taInput, 12, 100);
+  lv_textarea_set_one_line(taInput, true);
+  lv_textarea_set_max_length(taInput, maxLen);
+  lv_textarea_set_text(taInput, initial);
+  lv_obj_set_style_bg_color(taInput, C(RAISE), 0);
+  lv_obj_set_style_bg_opa(taInput, LV_OPA_COVER, 0);
+  lv_obj_set_style_text_color(taInput, C(TEXT), 0);
+  lv_obj_set_style_text_font(taInput, &font_tdos_20, 0);
+  lv_obj_set_style_pad_hor(taInput, 12, 0);
+  lv_obj_set_style_border_color(taInput, C(ACCENT), 0);
+  lv_obj_set_style_border_width(taInput, 2, 0);
+  lv_obj_set_style_radius(taInput, 14, 0);
+  lv_obj_set_style_border_side(taInput, LV_BORDER_SIDE_LEFT, LV_PART_CURSOR);
+  lv_obj_set_style_border_width(taInput, 2, LV_PART_CURSOR);
+  lv_obj_set_style_border_color(taInput, C(ACCENT), LV_PART_CURSOR);
+  lv_obj_set_style_bg_opa(taInput, LV_OPA_TRANSP, LV_PART_CURSOR);
+  lv_obj_set_style_anim_time(taInput, 450, LV_PART_CURSOR);
+  if (!inputGroup) inputGroup = lv_group_create();
+  lv_group_add_obj(inputGroup, taInput);
+  lv_group_focus_obj(taInput);
+
+  lv_obj_t* cancel = tappable(box(s, 140, 44, RAISE2, 14));
+  lv_obj_set_pos(cancel, 12, 160);
+  lv_obj_center(label(cancel, "Cancel", &font_tdos_16, TEXT));
+  lv_obj_add_event_cb(cancel, entryCancelCb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* save = tappable(box(s, 140, 44, ACCENT, 14));
+  lv_obj_set_pos(save, 168, 160);
+  lv_obj_center(label(save, "Save", &font_tdos_16, INK));
+  lv_obj_add_event_cb(save, entrySaveCb, LV_EVENT_CLICKED, nullptr);
+  loadApp(s);
+}
+
+static bool saveName(const char* t) {
+  char clean[32];
+  strncpy(clean, t, sizeof(clean) - 1);
+  clean[sizeof(clean) - 1] = 0;
+  int n = strlen(clean);
+  while (n > 0 && clean[n - 1] == ' ') clean[--n] = 0;
+  if (n == 0) { toast("A name cannot be empty"); return false; }
+  strncpy(cfg().name, clean, sizeof(cfg().name) - 1);
+  settings_changed();
+  if (actions.setName) actions.setName(clean);
+  strncpy(lastName, clean, sizeof(lastName) - 1);
+  openSettings();
+  toast("Name saved, advert sent");
+  return true;
+}
+
+static bool saveFreq(const char* t) {
+  float f = atof(t);
+  if (f < 400.0f || f > 960.0f) { toast("Use 400 to 960 MHz"); return false; }
+  cfg().freq = roundf(f * 1000.0f) / 1000.0f;
+  settings_changed();
+  if (actions.applyRadio) actions.applyRadio();
+  openAdvanced();
+  toast("Frequency set");
+  return true;
+}
+
+// ── Brightness: a slider over the chip's 16 levels ───────────────
+static void brightApply(int level) {
+  level = constrain(level, 1, 16);
+  cfg().brightness = (uint8_t)level;
+  setBacklight(level);
+  settings_changed();
+  if (brightLbl) {
+    char b[16];
+    snprintf(b, sizeof(b), "%d%%", level * 100 / 16);
+    lv_label_set_text(brightLbl, b);
+  }
+}
+static void brightCb(lv_event_t* e) {
+  brightApply(lv_slider_get_value(lv_event_get_target(e)));
+}
+
+static void openBrightness() {
+  mode = M_BRIGHT;
+  returnTo = M_SETTINGS;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Brightness");
+  char b[16];
+  snprintf(b, sizeof(b), "%d%%", cfg().brightness * 100 / 16);
+  brightLbl = label(s, b, &lv_font_montserrat_48, TEXT);
+  lv_obj_align(brightLbl, LV_ALIGN_CENTER, 0, -20);
+  brightSlider = lv_slider_create(s);
+  lv_obj_set_size(brightSlider, 270, 18);
+  lv_obj_align(brightSlider, LV_ALIGN_CENTER, 0, 44);
+  lv_slider_set_range(brightSlider, 1, 16);
+  lv_slider_set_value(brightSlider, cfg().brightness, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(brightSlider, C(RAISE2), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(brightSlider, C(ACCENT), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(brightSlider, C(TEXT), LV_PART_KNOB);
+  lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_KNOB);
+  lv_obj_set_style_pad_all(brightSlider, 6, LV_PART_KNOB);
+  lv_obj_add_event_cb(brightSlider, brightCb, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_t* hint = label(s, "Drag the bar, or roll the trackball sideways", &font_tdos_12, MUTE);
+  lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -14);
+  loadApp(s);
+}
+
+// ── Pickers' value callbacks ─────────────────────────────────────
+static void pickZone(int i) {
+  cfg().tzMinutes = zones[constrain(i, 0, ZONE_N - 1)].minutes;
+  settings_changed();
+  openSettings();
+}
+static void pickPreset(int i) {
+  const Preset& p = presets[constrain(i, 0, PRESET_N - 1)];
+  Settings& c = cfg();
+  c.freq = p.freq; c.bw = p.bw; c.sf = p.sf; c.cr = p.cr;
+  settings_changed();
+  if (actions.applyRadio) actions.applyRadio();
+  openAdvanced();
+}
+static void pickBw(int i) { cfg().bw = bwList[constrain(i, 0, BW_N - 1)]; settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
+static void pickSf(int i) { cfg().sf = 5 + constrain(i, 0, 7); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
+static void pickCr(int i) { cfg().cr = 5 + constrain(i, 0, 3); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
+static void pickPwr(int i) { cfg().txPower = 2 + constrain(i, 0, 20); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
+
+// ── Settings screen ──────────────────────────────────────────────
+static void fillSettings() {
+  if (!listBox) return;
+  lv_obj_clean(listBox);
+  listN = 0;
+  Settings& c = cfg();
+  char b[48], off[16];
+  addRow("Name", lastName, ROW_NAME, K_NAV);
+  int z = zoneIndex();
+  fmtOffset(c.tzMinutes, off, sizeof(off));
+  if (z >= 0) snprintf(b, sizeof(b), "%s", zones[z].name);
+  else snprintf(b, sizeof(b), "%s", off);
+  addRow("Time zone", b, ROW_TZ, K_NAV);
+  addRow("Daylight saving", c.dst ? "On" : "Off", ROW_DST, K_VALUE, c.dst);
+  snprintf(b, sizeof(b), "%d%%", c.brightness * 100 / 16);
+  addRow("Brightness", b, ROW_BRIGHT, K_NAV);
+  int p = presetIndex();
+  addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
+  snprintf(b, sizeof(b), "%d%%", lastBatt);
+  addRow("Battery", b, ROW_BATT, K_INFO);
+  addRow("About", "tdeck-os 0.1", ROW_ABOUT, K_INFO);
+  addRow("Advanced", "", ROW_ADV, K_NAV);
+  if (listKind[listSel] == K_INFO) listSel = nextSelectable(listSel, 1);
+  listHighlight();
+}
+
+static void openSettings() {
+  mode = M_SETTINGS;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Settings");
+  newListBox(s);
+  listSel = 0;
+  fillSettings();
+  loadApp(s);
+}
+
+// ── PIN entry ────────────────────────────────────────────────────
+void ui_pin_key(int k);
+void ui_pin_refresh();
+
+// First run: the owner chooses a PIN. Afterwards it is entered to get in. One screen transition
+// only: callers must not open another screen from the same tap that leads here.
+static void openPin() {
+  mode = M_PIN;
+  pinLen = 0;
+  pinBuf[0] = 0;
+  pinStage = cfg().pinSet ? 0 : 1;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Advanced");
+  pinMsg = label(s, "", &font_tdos_14, TEXT);
+  lv_obj_set_pos(pinMsg, 12, 70);
+  lv_obj_set_width(pinMsg, 150);
+  for (int i = 0; i < 4; i++) {
+    pinDots[i] = box(s, 16, 16, LINE, 8);
+    lv_obj_set_pos(pinDots[i], 14 + i * 28, 150);
+  }
+  const char* keys[12] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", LV_SYMBOL_BACKSPACE, "0", LV_SYMBOL_OK };
+  for (int k = 0; k < 12; k++) {
+    lv_obj_t* kb = tappable(box(s, 46, 36, RAISE, 10));
+    lv_obj_set_pos(kb, 168 + (k % 3) * 50, 60 + (k / 3) * 40);
+    lv_obj_center(label(kb, keys[k], &font_tdos_20, TEXT));
+    lv_obj_add_event_cb(kb, [](lv_event_t* e) { ui_pin_key((int)(intptr_t)lv_event_get_user_data(e)); },
+                        LV_EVENT_CLICKED, (void*)(intptr_t)k);
+  }
+  loadApp(s);
+  ui_pin_refresh();
+}
+
+static void openAdvanced();
+
+void ui_pin_refresh() {
+  if (!pinMsg) return;
+  static const char* const prompts[] = { "Enter PIN", "Choose a 4-digit PIN for Advanced settings", "Enter it again to confirm" };
+  lv_label_set_text(pinMsg, prompts[pinStage]);
+  for (int i = 0; i < 4; i++) lv_obj_set_style_bg_color(pinDots[i], C(i < pinLen ? ACCENT : LINE), 0);
+}
+
+// k: 0..8 = digits 1..9, 9 = backspace, 10 = digit 0, 11 = enter (the PIN submits itself at 4)
+void ui_pin_key(int k) {
+  ui_activity();
+  if (k == 9) { if (pinLen > 0) pinBuf[--pinLen] = 0; ui_pin_refresh(); return; }
+  if (k == 11) return;
+  char d = (k == 10) ? '0' : (char)('1' + k);
+  if (pinLen >= 4) return;
+  pinBuf[pinLen++] = d;
+  pinBuf[pinLen] = 0;
+  ui_pin_refresh();
+  if (pinLen < 4) return;
+
+  Settings& c = cfg();
+  bool wrong = false;
+  if (pinStage == 0) {
+    if (strcmp(pinBuf, c.pin) == 0) { openAdvanced(); return; }
+    wrong = true;
+  } else if (pinStage == 1) {
+    strcpy(pinFirst, pinBuf);
+    pinStage = 2;
+  } else {
+    if (strcmp(pinBuf, pinFirst) == 0) {
+      strcpy(c.pin, pinBuf);
+      c.pinSet = 1;
+      settings_changed();
+      openAdvanced();
+      toast("PIN saved");
+      return;
+    }
+    pinStage = 1;
+    pinLen = 0; pinBuf[0] = 0;
+    ui_pin_refresh();
+    lv_label_set_text(pinMsg, "Those did not match. Choose a PIN again.");
+    return;
+  }
+  pinLen = 0; pinBuf[0] = 0;
+  ui_pin_refresh();
+  if (wrong) lv_label_set_text(pinMsg, "Wrong PIN. Try again.");
+}
+
+// ── Advanced ─────────────────────────────────────────────────────
+static void fillAdvanced() {
+  if (!listBox) return;
+  int keepScroll = lv_obj_get_scroll_y(listBox);
+  lv_obj_clean(listBox);
+  listN = 0;
+  Settings& c = cfg();
+  char b[48];
+  int p = presetIndex();
+  addRow("Radio preset", p >= 0 ? presets[p].name : "Custom", AD_PRESET, K_NAV);
+  snprintf(b, sizeof(b), "%.3f MHz", c.freq);
+  addRow("Frequency", b, AD_FREQ, K_NAV);
+  snprintf(b, sizeof(b), "%.4g kHz", c.bw);
+  addRow("Bandwidth", b, AD_BW, K_NAV);
+  snprintf(b, sizeof(b), "SF %d", c.sf);
+  addRow("Spreading factor", b, AD_SF, K_NAV);
+  snprintf(b, sizeof(b), "4/%d", c.cr);
+  addRow("Coding rate", b, AD_CR, K_NAV);
+  snprintf(b, sizeof(b), "%d dBm", c.txPower);
+  addRow("TX power", b, AD_PWR, K_NAV);
+  addRow("Send advert", "Send", AD_ADVERT, K_BUTTON);
+  addRow("PIN", "Change", AD_PIN, K_BUTTON);
+  addRow(resetArmed ? "Tap again to confirm" : "Restore defaults", resetArmed ? "Confirm" : "Restore", AD_RESET, K_BUTTON);
+  if (resetArmed) lv_obj_set_style_bg_color(listRows[listN - 1], C(0x4A1F1A), 0);
+  addRow("Build", "MeshCore 1.x", AD_INFO, K_INFO);
+  if (listSel >= listN) listSel = listN - 1;
+  if (listKind[listSel] == K_INFO) listSel = nextSelectable(listSel, -1);
+  listHighlight();
+  lv_obj_scroll_to_y(listBox, keepScroll, LV_ANIM_OFF);
+}
+
+static void openAdvanced() {
+  mode = M_ADV;
+  pinMsg = nullptr;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Advanced");
+  newListBox(s);
+  listSel = 0;
+  resetArmed = false;
+  fillAdvanced();
+  loadApp(s);
+}
+
+static void settingsAct(int id) {
+  Settings& c = cfg();
+  switch (id) {
+    case ROW_NAME:
+      openEntry("Name", "How other people see you on the mesh.", lastName, 31, false, saveName, M_SETTINGS);
+      return;
+    case ROW_TZ: {
+      char off[16];
+      for (int i = 0; i < ZONE_N; i++) {
+        fmtOffset(zones[i].minutes, off, sizeof(off));
+        snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s  %s", zones[i].name, off);
+      }
+      openPicker("Time zone", ZONE_N, zoneIndex(), pickZone, M_SETTINGS);
+      return;
+    }
+    case ROW_DST:
+      c.dst = c.dst ? 0 : 1;
+      break;
+    case ROW_BRIGHT: openBrightness(); return;
+    case ROW_ADV: openPin(); return;
+    default: return;                                          // read-only rows
+  }
+  settings_changed();
+  fillSettings();
+}
+
+static void advAct(int id) {
+  Settings& c = cfg();
+  switch (id) {
+    case AD_PRESET:
+      for (int i = 0; i < PRESET_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", presets[i].name);
+      openPicker("Radio preset", PRESET_N, presetIndex(), pickPreset, M_ADV);
+      return;
+    case AD_FREQ: {
+      char f[16];
+      snprintf(f, sizeof(f), "%.3f", c.freq);
+      openEntry("Frequency", "In MHz, from 400 to 960.", f, 8, true, saveFreq, M_ADV);
+      return;
+    }
+    case AD_BW: {
+      int cur = 0;
+      for (int i = 0; i < BW_N; i++) {
+        snprintf(pickBuf[i], sizeof(pickBuf[i]), "%.4g kHz", bwList[i]);
+        if (fabsf(bwList[i] - c.bw) < fabsf(bwList[cur] - c.bw)) cur = i;
+      }
+      openPicker("Bandwidth", BW_N, cur, pickBw, M_ADV);
+      return;
+    }
+    case AD_SF:
+      for (int i = 0; i < 8; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "SF %d", 5 + i);
+      openPicker("Spreading factor", 8, constrain(c.sf - 5, 0, 7), pickSf, M_ADV);
+      return;
+    case AD_CR:
+      for (int i = 0; i < 4; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "4/%d", 5 + i);
+      openPicker("Coding rate", 4, constrain(c.cr - 5, 0, 3), pickCr, M_ADV);
+      return;
+    case AD_PWR:
+      for (int i = 0; i < 21; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%d dBm", 2 + i);
+      openPicker("TX power", 21, constrain(c.txPower - 2, 0, 20), pickPwr, M_ADV);
+      return;
+    case AD_ADVERT:
+      if (actions.advertise) actions.advertise();
+      toast("Advert sent");
+      return;
+    case AD_PIN:
+      c.pinSet = 0;
+      settings_changed();
+      openPin();                         // straight into "choose a PIN", one transition
+      return;
+    case AD_RESET:
+      if (!resetArmed) { resetArmed = true; fillAdvanced(); return; }
+      settings_defaults(true);
+      if (actions.applyRadio) actions.applyRadio();
+      resetArmed = false;
+      openSettings();
+      toast("Defaults restored");
+      return;
+    default: return;
+  }
+}
+
 // ── building the screens ─────────────────────────────────────────
 static void buildStatusBar() {
   bar = box(lv_layer_top(), 320, 22, INK, 0);
   lv_obj_set_pos(bar, 0, 0);
-  barTime = label(bar, "--:--", &lv_font_montserrat_14, TEXT);
+  barTime = label(bar, "--:--", &font_tdos_14, TEXT);
   lv_obj_align(barTime, LV_ALIGN_LEFT_MID, 8, 0);
-  barBatt = label(bar, LV_SYMBOL_BATTERY_3 " --%", &lv_font_montserrat_12, TEXT);
+  barBatt = label(bar, LV_SYMBOL_BATTERY_3 " --%", &font_tdos_12, TEXT);
   lv_obj_align(barBatt, LV_ALIGN_RIGHT_MID, -8, 0);
-  barSig = label(bar, LV_SYMBOL_WIFI, &lv_font_montserrat_12, MUTE);
+  barSig = label(bar, LV_SYMBOL_WIFI, &font_tdos_12, MUTE);
   lv_obj_align_to(barSig, barBatt, LV_ALIGN_OUT_LEFT_MID, -10, 0);
 }
 
 static void buildLock() {
   scrLock = newScreen();
-  lockMesh = label(scrLock, "Starting...", &lv_font_montserrat_12, MUTE);
+  lockMesh = label(scrLock, "Starting...", &font_tdos_12, MUTE);
   lv_obj_align(lockMesh, LV_ALIGN_TOP_MID, 0, 8);
   lockTime = label(scrLock, "--:--", &lv_font_montserrat_48, TEXT);
   lv_obj_align(lockTime, LV_ALIGN_CENTER, 0, -18);
-  lockDate = label(scrLock, "", &lv_font_montserrat_14, MUTE);
+  lockDate = label(scrLock, "", &font_tdos_14, MUTE);
   lv_obj_align(lockDate, LV_ALIGN_CENTER, 0, 26);
-  lv_obj_t* hint = label(scrLock, "Click, touch or press a key", &lv_font_montserrat_12, MUTE);
+  lv_obj_t* hint = label(scrLock, "Click, touch or press a key", &font_tdos_12, MUTE);
   lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
 
@@ -456,7 +1084,7 @@ static void buildHome() {
   for (int i = 0; i < 6; i++) {
     int cx = colX[i % 3];
     int top = rowTop[i / 3];
-    lv_obj_t* t = box(scrHome, 64, 64, apps[i].col, 18);
+    lv_obj_t* t = tappable(box(scrHome, 64, 64, apps[i].col, 18));
     lv_obj_set_pos(t, cx - 32, top);
     lv_obj_set_style_outline_color(t, C(TEXT), 0);
     lv_obj_set_style_outline_pad(t, 2, 0);
@@ -464,7 +1092,7 @@ static void buildHome() {
     lv_obj_t* s = label(t, apps[i].sym, &lv_font_montserrat_24, INK);
     lv_obj_center(s);
     lv_obj_add_event_cb(t, tileCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
-    lv_obj_t* n = label(scrHome, apps[i].name, &lv_font_montserrat_14, TEXT);
+    lv_obj_t* n = label(scrHome, apps[i].name, &font_tdos_14, TEXT);
     lv_obj_update_layout(n);
     lv_obj_set_pos(n, cx - lv_obj_get_width(n) / 2, top + 64 + 6);
     tiles[i] = t;
@@ -472,7 +1100,7 @@ static void buildHome() {
   // unread badge on the Messages tile
   badge = box(scrHome, 22, 22, BAD, 11);
   lv_obj_set_pos(badge, colX[0] + 32 - 14, rowTop[0] - 8);
-  badgeLbl = label(badge, "0", &lv_font_montserrat_12, 0xFFFFFF);
+  badgeLbl = label(badge, "0", &font_tdos_12, 0xFFFFFF);
   lv_obj_center(badgeLbl);
   lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);
 }
@@ -578,6 +1206,9 @@ void ui_update(const UiModel& m) {
   else snprintf(b, sizeof(b), m.signalBars > 0 ? "Mesh connected  -  %d nodes heard" : "No mesh heard yet", m.nodesHeard);
   lv_label_set_text(lockMesh, b);
 
+  lastBatt = m.batteryPct;
+  strncpy(lastName, m.nodeName, sizeof(lastName) - 1);
+
   if (m.unread != unreadShown) {
     unreadShown = m.unread;
     if (m.unread > 0) {
@@ -615,6 +1246,16 @@ void ui_nav(int dx, int dy) {
     lv_obj_scroll_to_y(convBox, max(0, convSel * 50 - 100), LV_ANIM_OFF);
   } else if (mode == M_THREAD && dy && thrBox) {
     lv_obj_scroll_by(thrBox, 0, -dy * 40, LV_ANIM_OFF);
+  } else if ((mode == M_SETTINGS || mode == M_ADV || mode == M_PICK) && listN > 0) {
+    if (dy) {
+      listSel = nextSelectable(listSel, dy > 0 ? 1 : -1);
+      listHighlight();
+      lv_obj_scroll_to_y(listBox, max(0, listSel * 38 - 76), LV_ANIM_OFF);
+    }
+  } else if (mode == M_BRIGHT && dx && brightSlider) {
+    int v = constrain(lv_slider_get_value(brightSlider) + dx, 1, 16);
+    lv_slider_set_value(brightSlider, v, LV_ANIM_OFF);
+    brightApply(v);
   }
 }
 
@@ -624,6 +1265,12 @@ void ui_click() {
   if (mode == M_HOME) openApp(sel);
   else if (mode == M_CONVS && convN > 0) openThread(convOrder[convSel]);
   else if (mode == M_THREAD) doSend();
+  else if (mode == M_ENTRY) entrySave();
+  else if ((mode == M_SETTINGS || mode == M_ADV || mode == M_PICK) && listN > 0) {
+    if (mode == M_SETTINGS) settingsAct(listIds[listSel]);
+    else if (mode == M_ADV) advAct(listIds[listSel]);
+    else pickChoose(listIds[listSel]);
+  }
 }
 
 void ui_long() {
@@ -646,7 +1293,19 @@ void ui_key(char c) {
     if (c >= 32 && c < 127) lv_textarea_add_char(taInput, (uint32_t)c);
     return;
   }
-  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG) && (c == 8 || c == 127)) { goBack(); return; }
+  if (mode == M_ENTRY && taInput) {
+    if (c == '\r' || c == '\n') { entrySave(); return; }
+    if (c == 8 || c == 127) { if (lv_textarea_get_text(taInput)[0] == 0) goBack(); else lv_textarea_del_char(taInput); return; }
+    bool ok = entryNumeric ? ((c >= '0' && c <= '9') || c == '.') : (c >= 32 && c < 127);
+    if (ok) lv_textarea_add_char(taInput, (uint32_t)c);
+    return;
+  }
+  if (mode == M_PIN) {
+    if (c >= '0' && c <= '9') { ui_pin_key(c == '0' ? 10 : c - '1'); return; }
+    if (c == 8 || c == 127) { if (pinLen == 0) goBack(); else ui_pin_key(9); return; }
+    return;
+  }
+  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT) && (c == 8 || c == 127)) { goBack(); return; }
 }
 
 bool ui_console_active() { return mode == M_DBG; }

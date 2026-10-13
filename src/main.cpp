@@ -27,6 +27,7 @@
 #include <target.h>
 #include "ui.h"
 #include "messages.h"
+#include "settings.h"
 
 #define PUBLIC_GROUP_PSK "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -237,7 +238,8 @@ public:
       store.save("_main", self_id);
       chatPush("New identity created");
     }
-    snprintf(name, sizeof(name), "TDeck-%02X%02X", self_id.pub_key[0], self_id.pub_key[1]);
+    if (cfg().name[0]) snprintf(name, sizeof(name), "%s", cfg().name);
+    else snprintf(name, sizeof(name), "TDeck-%02X%02X", self_id.pub_key[0], self_id.pub_key[1]);
     loadContacts();
     _public = addChannel("Public", PUBLIC_GROUP_PSK);
 
@@ -401,6 +403,7 @@ static void buildModel(UiModel& m) {
   m.signalBars = age < 120 ? 4 : age < 600 ? 3 : age < 3600 ? 2 : age < 10800 ? 1 : 0;
   m.nodesHeard = theMesh ? theMesh->getNumContacts() : 0;
   m.unread = msgs_unread_total();
+  if (theMesh) strncpy(m.nodeName, theMesh->name, sizeof(m.nodeName) - 1);
 
   char* o = m.consoleText;
   size_t left = sizeof(m.consoleText);
@@ -416,6 +419,22 @@ static void buildModel(UiModel& m) {
   for (int i = 0; i < CHAT_LINES; i++) add("%s\n", chatBuf[i]);
   add("click=advert, hold=home");
 }
+
+static void applyRadioFromSettings() {
+  const Settings& c = cfg();
+  radio_driver.setParams(c.freq, c.bw, c.sf, c.cr);
+  radio_driver.setTxPower(c.txPower);
+}
+
+static const UiActions uiActions = {
+  /* applyRadio */ []() { applyRadioFromSettings(); },
+  /* setName    */ [](const char* n) {
+    if (!theMesh) return;
+    snprintf(theMesh->name, sizeof(theMesh->name), "%s", n);
+    theMesh->advertise(0);                 // tell the mesh about the new name right away
+  },
+  /* advertise  */ []() { if (theMesh) { theMesh->advertise(0); chatPush("(advert sent)"); } },
+};
 
 void setup() {
   Serial.begin(115200);
@@ -445,8 +464,11 @@ void setup() {
   Wire.beginTransmission(KB_ADDR);
   kbOk = (Wire.endTransmission(true) == 0);
 
+  SPIFFS.begin(true);
+  settings_begin(SPIFFS);
   msgs_init();
   ui_init();
+  ui_set_actions(uiActions);
   ui_set_send_handler([](int conv, const char* text) { return theMesh && theMesh->sendConv(conv, text); });
 
   board.begin();
@@ -460,12 +482,10 @@ void setup() {
 
   if (radioOk) {
     fastRng.begin(radio_driver.getRngSeed());
-    SPIFFS.begin(true);
     theMesh = new DeckMesh(radio_driver, fastRng, rtc, tables);
     RadioNoiseListener noise(radio);
     theMesh->begin(SPIFFS, noise);
-    radio_driver.setParams(910.525f, 62.5f, 7, 5);
-    radio_driver.setTxPower(22);
+    applyRadioFromSettings();
     theMesh->advertise(1200);
     chatPush("%s ready, advert sent", theMesh->name);
   } else {
@@ -478,6 +498,7 @@ void loop() {
   uint32_t t0 = millis();
 
   if (theMesh) { theMesh->loop(); theMesh->tick(); }
+  settings_tick();
   rtc.tick();
   pollGps();
   pollKeyboard();
