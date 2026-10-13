@@ -201,6 +201,7 @@ static uint32_t avatarColor(const char* name) {
 }
 
 // ── navigation ───────────────────────────────────────────────────
+static void toast(const char* text);
 static void showHome();
 static void openApp(int i);
 static void openMap();
@@ -358,7 +359,12 @@ static void fillConvs() {
     lv_label_set_long_mode(n, LV_LABEL_LONG_CLIP);
     const Msg* last = c->count ? msgs_at(convOrder[r], c->count - 1) : nullptr;
     char pv[200] = "No messages yet";
-    if (last) emoji_filter(last->text, pv, sizeof(pv), true);
+    if (last) {
+      char tmp[230];
+      if (c->channel && last->sender[0] && !last->out) snprintf(tmp, sizeof(tmp), "%s: %s", last->sender, last->text);
+      else snprintf(tmp, sizeof(tmp), "%s", last->text);
+      emoji_filter(tmp, pv, sizeof(pv), true);
+    }
     lv_obj_t* p = label(row, pv, emoji_font(&font_tdos_12), MUTE);
     lv_obj_set_pos(p, 46, 25);
     lv_obj_set_width(p, 200);
@@ -367,7 +373,8 @@ static void fillConvs() {
       lv_obj_t* d = box(row, 22, 22, ACCENT, 11);
       lv_obj_set_pos(d, 282, 12);
       char u[8];
-      snprintf(u, sizeof(u), "%d", c->unread > 99 ? 99 : c->unread);
+      if (c->mentionUnread) snprintf(u, sizeof(u), "@");        // someone is talking to you
+      else snprintf(u, sizeof(u), "%d", c->unread > 99 ? 99 : c->unread);
       lv_obj_t* ul = label(d, u, &font_tdos_12, INK);
       lv_obj_center(ul);
     }
@@ -403,6 +410,48 @@ static void formatClock(uint32_t ts, char* out, size_t n) {
   snprintf(out, n, "%d:%02d %s", h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
 }
 
+// "3 hops", "1 hop", "direct" (heard straight from the sender) or "routed" (a direct-routed packet,
+// whose hop list was consumed on the way, so the count is unknown).
+static void formatHops(const Msg* m, char* out, size_t n) {
+  out[0] = 0;
+  if (!(m->flags & MF_RADIO)) return;
+  if (!(m->flags & MF_FLOOD)) { snprintf(out, n, "routed"); return; }
+  if (m->hops == 0) snprintf(out, n, "direct");
+  else if (m->hops == 1) snprintf(out, n, "1 hop");
+  else snprintf(out, n, "%d hops", m->hops);
+}
+// SNR in quarter-dB steps, printed without trailing zeros: 7.25, 6.5, -0.75, 11.
+static void formatSnr(int8_t snr4, char* out, size_t n) {
+  float v = snr4 / 4.0f;
+  snprintf(out, n, "%.2f", v);
+  size_t l = strlen(out);
+  while (l > 1 && out[l - 1] == '0') out[--l] = 0;
+  if (l > 1 && out[l - 1] == '.') out[--l] = 0;
+}
+
+// Reply: put @[Sender] at the start of the message box, replacing a mention already there so one
+// tap per person switches who the reply is for. The name goes in exactly as it was transmitted.
+static void insertMention(const char* sender) {
+  if (!taInput || !sender || !sender[0]) return;
+  const char* cur = lv_textarea_get_text(taInput);
+  const char* rest = cur;
+  if (strncmp(cur, "@[", 2) == 0) {
+    const char* close = strchr(cur, ']');
+    if (close) { rest = close + 1; if (*rest == ' ') rest++; }
+  }
+  char buf[220];
+  snprintf(buf, sizeof(buf), "@[%s] %s", sender, rest);
+  if (strlen(buf) > 140) { toast("Too long to add a mention"); return; }
+  lv_textarea_set_text(taInput, buf);
+  lv_textarea_set_cursor_pos(taInput, LV_TEXTAREA_CURSOR_LAST);
+}
+static void bubbleTapCb(lv_event_t* e) {
+  const Conv* c = msgs_conv(curConv);
+  const Msg* m = msgs_at(curConv, (int)(intptr_t)lv_event_get_user_data(e));
+  if (!c || !c->channel || !m || m->out || !m->sender[0]) return;   // only replies to others, in a channel
+  insertMention(m->sender);
+}
+
 static void buildThread() {
   if (!thrBox) return;
   lv_obj_clean(thrBox);
@@ -426,6 +475,15 @@ static void buildThread() {
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
                           m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
 
+    bool channelIn = !m->out && c->channel && m->sender[0];
+    if (channelIn) {
+      char who[48];
+      emoji_filter(m->sender, who, sizeof(who), true);
+      lv_obj_t* cap = label(row, who, emoji_font(&font_tdos_12), avatarColor(m->sender));
+      lv_obj_set_style_max_width(cap, 236, 0);
+      lv_label_set_long_mode(cap, LV_LABEL_LONG_CLIP);
+    }
+
     lv_obj_t* b = lv_obj_create(row);
     lv_obj_set_width(b, LV_SIZE_CONTENT);
     lv_obj_set_height(b, LV_SIZE_CONTENT);
@@ -437,6 +495,14 @@ static void buildThread() {
     lv_obj_set_style_pad_hor(b, 10, 0);
     lv_obj_set_style_pad_ver(b, 6, 0);
     lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    if (m->flags & MF_MENTION) {                       // someone addressed this node by name
+      lv_obj_set_style_border_width(b, 2, 0);
+      lv_obj_set_style_border_color(b, C(ACCENT), 0);
+    }
+    if (channelIn) {                                   // tap = reply to this person
+      lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_add_event_cb(b, bubbleTapCb, LV_EVENT_CLICKED, (void*)(intptr_t)i);
+    }
 
     char shown[200];
     emoji_filter(m->text, shown, sizeof(shown), true);
@@ -451,7 +517,14 @@ static void buildThread() {
     formatClock(m->ts, when, sizeof(when));
     uint32_t metaCol = MUTE;
     if (!m->out) {
-      snprintf(meta, sizeof(meta), "%s", when);
+      char hp[16], sn[16];
+      formatHops(m, hp, sizeof(hp));
+      if (hp[0]) {
+        formatSnr(m->snr4, sn, sizeof(sn));
+        snprintf(meta, sizeof(meta), "%s  %s  SNR %s", when, hp, sn);
+      } else {
+        snprintf(meta, sizeof(meta), "%s", when);
+      }
     } else if (m->status == MS_DELIVERED) {
       char rtt[16] = "";
       if (m->rtt100) snprintf(rtt, sizeof(rtt), " %.1fs", m->rtt100 / 10.0f);
@@ -594,7 +667,7 @@ static constexpr int ZONE_N = sizeof(zones) / sizeof(zones[0]);
 static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
 static constexpr int BW_N = 10;
 
-enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_BRIGHT, ROW_VOLUME, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
+enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
 enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
@@ -873,6 +946,11 @@ static void openLevel(int kind) {
 }
 
 // ── Pickers' value callbacks ─────────────────────────────────────
+static void pickChannelSound(int i) {
+  cfg().channelSound = (uint8_t)constrain(i, 0, 2);
+  settings_changed();
+  openSettings();
+}
 static void pickZone(int i) {
   cfg().tzMinutes = zones[constrain(i, 0, ZONE_N - 1)].minutes;
   settings_changed();
@@ -910,6 +988,8 @@ static void fillSettings() {
   if (c.volume == 0) snprintf(b, sizeof(b), "Muted");
   else snprintf(b, sizeof(b), "%d%%", c.volume);
   addRow("Volume", b, ROW_VOLUME, K_NAV);
+  static const char* const chNames[3] = { "Off", "Mentions only", "All messages" };
+  addRow("Channel sounds", chNames[constrain(c.channelSound, 0, 2)], ROW_CHSOUND, K_NAV);
   int p = presetIndex();
   addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
   snprintf(b, sizeof(b), "%d%%", lastBatt);
@@ -1075,6 +1155,12 @@ static void settingsAct(int id) {
       break;
     case ROW_BRIGHT: openLevel(0); return;
     case ROW_VOLUME: openLevel(1); return;
+    case ROW_CHSOUND:
+      snprintf(pickBuf[0], sizeof(pickBuf[0]), "Off");
+      snprintf(pickBuf[1], sizeof(pickBuf[1]), "Mentions only");
+      snprintf(pickBuf[2], sizeof(pickBuf[2]), "All messages");
+      openPicker("Channel sounds", 3, constrain(c.channelSound, 0, 2), pickChannelSound, M_SETTINGS);
+      return;
     case ROW_ADV: openPin(); return;
     default: return;                                          // read-only rows
   }

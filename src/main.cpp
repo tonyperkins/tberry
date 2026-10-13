@@ -201,18 +201,58 @@ protected:
     nodes_seen(from.id.pub_key, from.name, from.type, getRTCClock()->getCurrentTime(),
                (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR(), -1);
     int conv = msgs_ensure(from.id.pub_key, from.name, false);
-    msgs_add(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED);
-    audio_play(SND_RECEIVE);                // direct messages only: the public channel is too chatty to chime
+    MsgInfo info = radioInfo(pkt);
+    strncpy(info.sender, from.name, sizeof(info.sender) - 1);
+    msgs_add_info(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
+    audio_play(SND_RECEIVE);                // a direct message always chimes
     chatPush("%s: %s", from.name, text);
     logf("DM from %s (%s): %s\n", from.name, pkt->isRouteDirect() ? "direct" : "flood", text);
+  }
+
+  // What the radio knew about a received packet. SNR and RSSI belong to the last hop only.
+  MsgInfo radioInfo(const mesh::Packet* pkt) {
+    MsgInfo i = {};
+    i.flags = MF_RADIO;
+    i.snr4 = pkt->_snr;
+    i.rssi = (int16_t)radio_driver.getLastRSSI();
+    if (pkt->isRouteFlood()) {
+      i.flags |= MF_FLOOD;
+      i.hops = (int8_t)min<int>(pkt->getPathHashCount(), 63);
+    } else {
+      i.hops = -1;                          // routed straight to us: the hop list has been consumed
+    }
+    return i;
+  }
+
+  // Does `text` address this node, as @[OurName]? Compared on the raw text, because the stored copy
+  // has had joiners and variation selectors removed.
+  bool mentionsMe(const char* text) const {
+    char needle[40];
+    snprintf(needle, sizeof(needle), "@[%s]", name);
+    return strstr(text, needle) != nullptr;
   }
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onSignedMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const uint8_t*, const char*) override {}
   void onChannelMessageRecv(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t, const char* text) override {
     lastHeardMs = millis();
-    msgs_add(_pubConv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED);
+    // Channel text arrives as "Sender: body". Keep the sender exactly as sent so a reply can mention
+    // them byte for byte, and store the body on its own.
+    MsgInfo info = radioInfo(pkt);
+    const char* body = text;
+    const char* sep = strstr(text, ": ");
+    if (sep && sep > text && (size_t)(sep - text) < sizeof(info.sender)) {
+      memcpy(info.sender, text, sep - text);
+      info.sender[sep - text] = 0;
+      body = sep + 2;
+    }
+    bool mention = mentionsMe(text);
+    if (mention) info.flags |= MF_MENTION;
+    msgs_add_info(_pubConv, false, body, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
+    // The channel is silent unless the owner asked for more (TDOS-006).
+    uint8_t policy = cfg().channelSound;
+    if (policy == 2 || (policy == 1 && mention)) audio_play(SND_RECEIVE);
     chatPush("# %s", text);
-    logf("channel msg (hops %d): %s\n", (int)pkt->path_len, text);
+    logf("channel msg (hops %d)%s: %s\n", (int)pkt->getPathHashCount(), mention ? " MENTION" : "", text);
   }
   uint8_t onContactRequest(const ContactInfo&, uint32_t, const uint8_t*, uint8_t, uint8_t*) override { return 0; }
   void onContactResponse(const ContactInfo&, const uint8_t*, uint8_t) override {}

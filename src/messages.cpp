@@ -84,7 +84,8 @@ const Msg* msgs_at(int conv, int i) {
 }
 
 // Shared by new and loaded messages. id == 0 means "assign the next id".
-static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status, bool loaded) {
+static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status, bool loaded,
+                            const MsgInfo* info) {
   if (conv < 0 || conv >= MAX_CONVS || !convs[conv].used) return 0;
   Conv& c = convs[conv];
   if (!c.msgs) {
@@ -108,10 +109,19 @@ static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, u
   m.status = status;
   m.out = out;
   m.rtt100 = 0;
+  m.hops = -1; m.snr4 = 0; m.rssi = 0; m.flags = 0; m.sender[0] = 0;
+  if (info) {
+    m.hops = info->hops; m.snr4 = info->snr4; m.rssi = info->rssi; m.flags = info->flags;
+    strncpy(m.sender, info->sender, sizeof(m.sender) - 1);
+    m.sender[sizeof(m.sender) - 1] = 0;
+  }
   cleanText(m.text, sizeof(m.text), text);
   if (ts > c.lastTs) c.lastTs = ts;
   if (!loaded) {
-    if (!out && conv != openConv) c.unread++;
+    if (!out && conv != openConv) {
+      c.unread++;
+      if ((m.flags & MF_MENTION) && c.mentionUnread < 250) c.mentionUnread++;
+    }
     if (sink && sink->onAdd) sink->onAdd(c.key, m);
   }
   version++;
@@ -119,10 +129,16 @@ static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, u
 }
 
 uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t status) {
-  return addInternal(conv, 0, out, text, ts, status, false);
+  return addInternal(conv, 0, out, text, ts, status, false, nullptr);
+}
+uint32_t msgs_add_info(int conv, bool out, const char* text, uint32_t ts, uint8_t status, const MsgInfo& info) {
+  return addInternal(conv, 0, out, text, ts, status, false, &info);
 }
 uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status) {
-  return addInternal(conv, id, out, text, ts, status, true);
+  return addInternal(conv, id, out, text, ts, status, true, nullptr);
+}
+uint32_t msgs_add_loaded_info(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status, const MsgInfo& info) {
+  return addInternal(conv, id, out, text, ts, status, true, &info);
 }
 
 static void setStatusInternal(int conv, uint32_t id, uint8_t status, uint16_t rtt100, bool loaded) {
@@ -144,7 +160,11 @@ void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt1
 void msgs_set_sink(const MsgSink* s) { sink = s; }
 
 void msgs_mark_read(int conv) {
-  if (conv >= 0 && conv < MAX_CONVS && convs[conv].used && convs[conv].unread) { convs[conv].unread = 0; version++; }
+  if (conv >= 0 && conv < MAX_CONVS && convs[conv].used && (convs[conv].unread || convs[conv].mentionUnread)) {
+    convs[conv].unread = 0;
+    convs[conv].mentionUnread = 0;
+    version++;
+  }
 }
 
 void msgs_set_open(int conv) { openConv = conv; }

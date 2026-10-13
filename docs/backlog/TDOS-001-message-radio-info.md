@@ -1,6 +1,6 @@
 # TDOS-001: Show hops, SNR and RSSI on received messages
 
-**Type:** feature  **Status:** open  **Area:** Messages, message store, mesh glue
+**Type:** feature  **Status:** done  **Area:** Messages, message store, mesh glue
 
 ## Why
 When range-testing it is not enough to know that a message arrived. You want to know how it got

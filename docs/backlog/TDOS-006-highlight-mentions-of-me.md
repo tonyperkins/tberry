@@ -1,6 +1,6 @@
 # TDOS-006: Highlight and chime for messages that mention me
 
-**Type:** feature  **Status:** open  **Area:** Messages, audio  **Depends on:** TDOS-003 (shares the name parsing)
+**Type:** feature  **Status:** done  **Area:** Messages, audio  **Depends on:** TDOS-003 (shares the name parsing)
 
 ## Why
 The public channel is silent by design (too busy to chime). But when someone replies to you, with

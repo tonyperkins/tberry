@@ -12,6 +12,9 @@ static bool ready = false;
 static constexpr const char* DIR_MSGS = "/tdos/msgs";
 
 struct __attribute__((packed)) RecM { uint8_t type; uint8_t out; uint8_t status; uint8_t len; uint32_t id; uint32_t ts; };
+// 'N' = message with radio info and the raw sender (TDOS-001/003). Followed by the sender, then the text.
+struct __attribute__((packed)) RecN { uint8_t type; uint8_t out; uint8_t status; uint8_t len; uint32_t id; uint32_t ts;
+                                      int8_t hops; int8_t snr4; int16_t rssi; uint8_t flags; uint8_t senderLen; };
 struct __attribute__((packed)) RecS { uint8_t type; uint8_t status; uint16_t rtt100; uint32_t id; };   // rtt100 was padding: old files read as 0
 
 // ── write queue (filled by the store's sink, drained by storage_tick) ──
@@ -21,6 +24,10 @@ struct Ev {
   uint8_t out, status;
   uint16_t rtt100;
   uint32_t id, ts;
+  int8_t hops, snr4;
+  int16_t rssi;
+  uint8_t flags;
+  char sender[32];
   char text[164];
 };
 static constexpr int QN = 48;
@@ -38,7 +45,9 @@ static void sinkAdd(const uint8_t key[4], const Msg& m) {
   if (!ready) return;
   Ev e = {};
   memcpy(e.key, key, 4);
-  e.kind = 'M'; e.out = m.out; e.status = m.status; e.id = m.id; e.ts = m.ts;
+  e.kind = 'N'; e.out = m.out; e.status = m.status; e.id = m.id; e.ts = m.ts;
+  e.hops = m.hops; e.snr4 = m.snr4; e.rssi = m.rssi; e.flags = m.flags;
+  strncpy(e.sender, m.sender, sizeof(e.sender) - 1);
   strncpy(e.text, m.text, sizeof(e.text) - 1);
   push(e);
 }
@@ -60,9 +69,10 @@ static void writeEvent(const Ev& e) {
   pathFor(e.key, path, sizeof(path));
   File f = SD.open(path, FILE_APPEND);
   if (!f) return;
-  if (e.kind == 'M') {
-    RecM r = { 'M', e.out, e.status, (uint8_t)strlen(e.text), e.id, e.ts };
+  if (e.kind == 'N') {
+    RecN r = { 'N', e.out, e.status, (uint8_t)strlen(e.text), e.id, e.ts, e.hops, e.snr4, e.rssi, e.flags, (uint8_t)strlen(e.sender) };
     f.write((const uint8_t*)&r, sizeof(r));
+    f.write((const uint8_t*)e.sender, r.senderLen);
     f.write((const uint8_t*)e.text, r.len);
   } else {
     RecS r = { 'S', e.status, e.rtt100, e.id };
@@ -100,8 +110,10 @@ static void compact(int conv) {
   if (!f) return;
   for (int i = 0; i < c->count; i++) {
     const Msg* m = msgs_at(conv, i);
-    RecM r = { 'M', (uint8_t)m->out, m->status, (uint8_t)strlen(m->text), m->id, m->ts };
+    RecN r = { 'N', (uint8_t)m->out, m->status, (uint8_t)strlen(m->text), m->id, m->ts, m->hops, m->snr4, m->rssi, m->flags,
+               (uint8_t)strlen(m->sender) };
     f.write((const uint8_t*)&r, sizeof(r));
+    f.write((const uint8_t*)m->sender, r.senderLen);
     f.write((const uint8_t*)m->text, r.len);
     if (m->rtt100) {
       RecS s = { 'S', m->status, m->rtt100, m->id };
@@ -140,6 +152,17 @@ void storage_load_messages() {
         char text[164] = {0};
         if (r.len >= sizeof(text) || f.read((uint8_t*)text, r.len) != r.len) break;
         msgs_add_loaded(conv, r.id, r.out, text, r.ts, r.status);
+        records++;
+      } else if (type == 'N') {
+        RecN r;
+        if (f.read((uint8_t*)&r, sizeof(r)) != sizeof(r)) break;
+        MsgInfo info = {};
+        char text[164] = {0};
+        if (r.senderLen >= sizeof(info.sender) || r.len >= sizeof(text)) break;
+        if (r.senderLen && f.read((uint8_t*)info.sender, r.senderLen) != r.senderLen) break;
+        if (f.read((uint8_t*)text, r.len) != r.len) break;
+        info.hops = r.hops; info.snr4 = r.snr4; info.rssi = r.rssi; info.flags = r.flags;
+        msgs_add_loaded_info(conv, r.id, r.out, text, r.ts, r.status, info);
         records++;
       } else if (type == 'S') {
         RecS r;

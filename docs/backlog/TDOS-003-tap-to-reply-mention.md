@@ -1,6 +1,6 @@
 # TDOS-003: Tap a channel message to insert an @[Name] reply mention
 
-**Type:** feature  **Status:** open  **Area:** Messages (thread view)
+**Type:** feature  **Status:** done  **Area:** Messages (thread view)
 
 ## Why
 MeshCore users address someone in a shared channel by writing their node name as `@[Name]` at the

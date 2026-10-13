@@ -6,12 +6,33 @@
 
 enum MsgStatus : uint8_t { MS_SENDING = 0, MS_SENT = 1, MS_DELIVERED = 2, MS_FAILED = 3, MS_RECEIVED = 4 };
 
+// Flags on a message.
+enum MsgFlag : uint8_t {
+  MF_RADIO = 1,      // hops / snr4 / rssi were captured when it arrived
+  MF_FLOOD = 2,      // it was flooded (hops counts the repeaters); otherwise routed directly
+  MF_MENTION = 4,    // the text mentions this node's name as @[Name]
+};
+
+// What the radio told us about a received message (TDOS-001) and who sent it (TDOS-003).
+struct MsgInfo {
+  int8_t hops;       // repeaters passed through; -1 unknown
+  int8_t snr4;       // SNR of the last hop in quarter dB
+  int16_t rssi;      // RSSI of the last hop in dBm
+  uint8_t flags;     // MsgFlag
+  char sender[32];   // the sender's name exactly as transmitted (channel messages), else empty
+};
+
 struct Msg {
   uint32_t id;       // unique and increasing; stays valid when old messages are evicted
   uint32_t ts;       // unix seconds, our clock when it was stored
   uint8_t status;    // MsgStatus
   bool out;
   uint16_t rtt100;   // delivery round trip in 100 ms units; 0 = unknown
+  int8_t hops;
+  int8_t snr4;
+  int16_t rssi;
+  uint8_t flags;
+  char sender[32];   // raw sender name, kept unsanitised so a reply mention matches exactly
   char text[164];
 };
 
@@ -27,6 +48,7 @@ struct Conv {
   int count;         // messages held, oldest first
   int start;         // ring buffer start
   int unread;
+  uint8_t mentionUnread;   // unread messages that mention this node
   uint32_t lastTs;
   Msg* msgs;         // MSGS_PER_CONV entries, allocated on first use
 };
@@ -37,6 +59,7 @@ int msgs_ensure(const uint8_t key[4], const char* name, bool channel);
 const Conv* msgs_conv(int idx);
 const Msg* msgs_at(int conv, int i);                                  // i = 0 is the oldest
 uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t status);   // returns the id
+uint32_t msgs_add_info(int conv, bool out, const char* text, uint32_t ts, uint8_t status, const MsgInfo& info);
 void msgs_set_status(int conv, uint32_t id, uint8_t status, uint16_t rtt100 = 0);
 void msgs_mark_read(int conv);
 void msgs_set_open(int conv);                                         // the conversation on screen, or -1
@@ -53,5 +76,6 @@ struct MsgSink {
 void msgs_set_sink(const MsgSink* sink);
 // Insert a message read back from storage: keeps its id, is never unread, and is not re-saved.
 uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status);
+uint32_t msgs_add_loaded_info(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status, const MsgInfo& info);
 void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt100 = 0);   // same, for a status record
                                               // changes whenever anything does
