@@ -26,6 +26,7 @@
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
 #include <target.h>
 #include "ui.h"
+#include "remote.h"
 #include "messages.h"
 #include "settings.h"
 #include "storage.h"
@@ -49,6 +50,7 @@ static constexpr uint8_t KB_ADDR = 0x55;
 // HWCDC::write() waits for the USB host to drain the buffer, and with nobody reading the
 // port that wait is unbounded. Only write when the whole line fits.
 static void logf(const char* fmt, ...) {
+  if (remote_streaming()) return;          // a screenshot is going out over the same port
   char b[200];
   va_list ap; va_start(ap, fmt);
   int n = vsnprintf(b, sizeof(b), fmt, ap);
@@ -756,6 +758,9 @@ static const UiActions uiActions = {
 };
 
 void setup() {
+#ifdef TDOS_REMOTE
+  Serial.setTxBufferSize(8192);                // room for screenshot chunks
+#endif
   Serial.begin(115200);
   Serial.setTxTimeoutMs(1);
 
@@ -797,6 +802,7 @@ void setup() {
   audio_begin();
   audio_set_volume(cfg().volume);
   ui_init();
+  remote_begin();
   ui_set_actions(uiActions);
   ui_set_send_handler([](int conv, const char* text) { return theMesh && theMesh->sendConv(conv, text); });
 
@@ -836,6 +842,7 @@ void loop() {
   pollGps();
   pollKeyboard();
   pollTrackball();
+  remote_poll();
 
   uint32_t now = millis();
   if (now - lastDraw >= 250) {

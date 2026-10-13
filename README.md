@@ -95,6 +95,14 @@ emoji still work, just slower.
 Mount the card without the `flush` option when copying tens of thousands of tiles
 (`mount -o noatime,async`): the desktop default is roughly 30 times slower.
 
+## Debug build and remote control
+
+`pio run -e tdeck-remote` builds the same firmware with a serial remote control compiled in. With it,
+`tdeck-os/tools/remote.py` can tap, swipe, type, move the trackball and save screenshots over USB, for
+example `python3 tdeck-os/tools/remote.py "tap 160 120" "wait 500" "shot home.png"`. The normal build
+leaves this out, About shows "debug" when it is present, and `tdeck-os/tools/release.sh` builds the
+release image and checks that no debug code is in it.
+
 ## Privacy
 
 The device does **not** broadcast its position. Identity (the private key), settings and contacts

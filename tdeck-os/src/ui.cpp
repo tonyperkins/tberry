@@ -17,6 +17,7 @@
 #include "rangetest.h"
 #include "fonts/fonts.h"
 #include "emoji.h"
+#include "remote.h"
 #include "audio.h"
 #include "reaction.h"
 #include "mention.h"
@@ -46,6 +47,7 @@ static lv_indev_drv_t touchDrv;
 
 static void flushCb(lv_disp_drv_t* d, const lv_area_t* a, lv_color_t* c) {
   uint32_t w = a->x2 - a->x1 + 1, h = a->y2 - a->y1 + 1;
+  remote_capture(a, c);
   tft.startWrite();
   tft.setAddrWindow(a->x1, a->y1, w, h);
   tft.pushColors((uint16_t*)&c->full, w * h, true);
@@ -1556,7 +1558,11 @@ static void fillSettings() {
   snprintf(b, sizeof(b), "%d%%", lastBatt);
   addRow("Battery", b, ROW_BATT, K_INFO);
   addRow("History", lastStorage, ROW_ABOUT, K_INFO);
+#ifdef TDOS_REMOTE
+  addRow("About", "tdeck-os 0.1 debug", ROW_ABOUT, K_INFO);     // remote control is compiled in
+#else
   addRow("About", "tdeck-os 0.1", ROW_ABOUT, K_INFO);
+#endif
   addRow("Advanced", "", ROW_ADV, K_NAV);
   if (listKind[listSel] == K_INFO) listSel = nextSelectable(listSel, 1);
   listHighlight();
@@ -2501,7 +2507,8 @@ static void touchRead(lv_indev_drv_t*, lv_indev_data_t* data) {
   static int16_t tapX = 0, tapY = 0;
 
   bool have = false, nowDown = false;
-  if (touchAddr) {
+  bool injected = remote_touch(lastX, lastY, have, nowDown);   // debug builds: touch from the serial port
+  if (!injected && touchAddr) {
     uint8_t s;
     if (gt911Read(0x814E, &s, 1) && (s & 0x80)) {
       have = true;
@@ -2811,6 +2818,7 @@ void ui_key(char c) {
 }
 
 bool ui_console_active() { return mode == M_DBG; }
+int ui_mode() { return (int)mode; }
 
 uint32_t ui_lvgl_free() {
   lv_mem_monitor_t mon;
