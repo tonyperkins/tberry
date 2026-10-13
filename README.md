@@ -96,6 +96,18 @@ emoji still work, just slower.
 Mount the card without the `flush` option when copying tens of thousands of tiles
 (`mount -o noatime,async`): the desktop default is roughly 30 times slower.
 
+## Updating over the air
+
+Settings has **WiFi** (pick a network, type the password) and **Software update**. The device
+fetches `releases/latest/download/manifest.json` from this repository's GitHub releases, shows the
+version on offer, and installs it when asked. Nothing is installed unless its Ed25519 signature,
+size and SHA-256 all match; the public key is compiled into the firmware.
+
+To publish: raise `TDOS_VERSION` and `TDOS_BUILD` in `tdeck-os/include/version.h`, then run
+`tdeck-os/tools/publish_release.sh "notes"`. The signing key lives outside the repository at
+`~/.config/tberry/signing.key` and must be backed up; without it devices can only be updated over
+USB. `tools/make_ca_bundle.py` regenerates the certificate bundle used for HTTPS.
+
 ## Debug build and remote control
 
 `pio run -e tdeck-remote` builds the same firmware with a serial remote control compiled in. With it,

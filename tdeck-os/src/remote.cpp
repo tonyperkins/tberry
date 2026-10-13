@@ -35,6 +35,7 @@ static bool wantIdle = false;           // OK when the touch queue is empty and 
 static uint8_t txStage = 0;
 static size_t txPos = 0;
 static char txHead[48];
+static uint32_t txProgressAt = 0;       // last time bytes went out; a host that stops reading must not wedge the stream
 
 bool remote_streaming() { return txStage != 0; }
 
@@ -98,6 +99,7 @@ static void startShot() {
   snprintf(txHead, sizeof(txHead), "SHOT %d %d %d\n", W, H, W * H * 2);
   txStage = 1;
   txPos = 0;
+  txProgressAt = millis();
 }
 
 static void exec(char* s) {
@@ -131,7 +133,11 @@ void remote_poll() {
   }
   if (txStage) {
     int room = Serial.availableForWrite();
-    if (room <= 0) return;
+    if (room <= 0) {
+      if (millis() - txProgressAt > 3000) { txStage = 0; busy = false; }     // nobody is reading: drop the frame
+      return;
+    }
+    txProgressAt = millis();
     if (txStage == 1) {
       size_t n = strlen(txHead);
       if ((size_t)room < n) return;

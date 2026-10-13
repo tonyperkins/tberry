@@ -77,6 +77,8 @@ def main():
         return 1
     # Leave DTR/RTS at the defaults: toggling them makes the ESP32-S3's USB port reset the chip.
     s = serial.Serial(port, 115200, timeout=0.5)
+    s.write(b"\n")                    # end any half-sent command line
+    time.sleep(0.4)
     s.reset_input_buffer()
     for cmd in args:
         if cmd.startswith("shot "):

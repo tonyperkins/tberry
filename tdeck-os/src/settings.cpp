@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 static constexpr uint32_t MAGIC = 0x53444F54;   // "TODS"
-static constexpr uint16_t VERSION = 8;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off
+static constexpr uint16_t VERSION = 9;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates
 static constexpr const char* PATH = "/settings";
 
 static Settings s;
@@ -49,6 +49,7 @@ void settings_begin(fs::FS& fs) {
     else if (tmp.version == 5) { tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == 6) { tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == 7) { tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 8) { tmp.version = VERSION; s = tmp; }       // WiFi fields stay empty
     else if (tmp.version == VERSION) s = tmp;
   }
   f.close();

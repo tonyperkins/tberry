@@ -19,6 +19,8 @@
 #include "emoji.h"
 #include "remote.h"
 #include "diag.h"
+#include "updater.h"
+#include "version.h"
 #include "audio.h"
 #include "reaction.h"
 #include "mention.h"
@@ -79,7 +81,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL, M_SETUP };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL, M_SETUP, M_UPDATE, M_WIFI };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -240,6 +242,9 @@ static uint32_t avatarColor(const char* name) {
 static void toast(const char* text);
 static void showHome();
 static void openApp(int i);
+static void openWifiScan();
+static void openUpdate();
+static void netScreenTick();
 static void openSetup(int step);
 static void openMap();
 static void openMapFocus(double lat, double lon, const char* name);
@@ -375,6 +380,7 @@ static void goBack() {
   }
   if (mode == M_THREAD) { openConvs(); return; }
   if (mode == M_DETAIL) { int c = detailConv; detailConv = -1; openThread(c); return; }
+  if (mode == M_UPDATE || mode == M_WIFI) { updater_stop(); openSettings(); return; }
   if (mode == M_PICK && returnTo == M_SETUP) { openSetup(2); return; }
   if (mode == M_SETUP) return;                         // the setup has its own Back button
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
@@ -1149,7 +1155,7 @@ static constexpr int ZONE_N = sizeof(zones) / sizeof(zones[0]);
 static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
 static constexpr int BW_N = 10;
 
-enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
+enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_WIFI, ROW_UPDATE, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
 enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
@@ -1571,6 +1577,167 @@ static void openSetup(int step) {
   loadApp(s);
 }
 
+
+// ── WiFi and software update ─────────────────────────────────────
+static char wifiChosen[33];
+static lv_obj_t *updTitle, *updDetail, *updBar, *updBtn, *updBtnLbl, *wifiNote;
+static uint32_t updDoneAt = 0;
+
+static bool saveWifi(const char* pass) {
+  snprintf(cfg().wifiSsid, sizeof(cfg().wifiSsid), "%s", wifiChosen);
+  snprintf(cfg().wifiPass, sizeof(cfg().wifiPass), "%s", pass);
+  settings_changed();
+  openSettings();
+  toast("WiFi saved");
+  return true;
+}
+static void pickWifi(int i) {
+  bool haveSaved = cfg().wifiSsid[0] != 0;
+  if (haveSaved && i == 0) {                       // "Forget saved network"
+    cfg().wifiSsid[0] = 0;
+    cfg().wifiPass[0] = 0;
+    settings_changed();
+    openSettings();
+    toast("WiFi forgotten");
+    return;
+  }
+  const char* s = updater_scan_ssid(i - (haveSaved ? 1 : 0));
+  snprintf(wifiChosen, sizeof(wifiChosen), "%s", s);
+  openEntry("WiFi password", wifiChosen, "", 63, false, saveWifi, M_SETTINGS);
+}
+
+static void openWifiScan() {
+  mode = M_WIFI;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "WiFi");
+  wifiNote = label(s, "Looking for networks...", &font_tdos_16, MUTE);
+  lv_obj_set_pos(wifiNote, 16, 100);
+  updater_scan_start();
+  loadApp(s);
+}
+
+static void updBtnCb(lv_event_t*) {
+  const UpStatus& u = updater_status();
+  if (!cfg().wifiSsid[0]) { openWifiScan(); return; }
+  if (u.state == UP_AVAILABLE) updater_install_start();
+  else if (u.state == UP_DONE) ESP.restart();
+  else if (u.state == UP_ERROR || u.state == UP_UPTODATE || u.state == UP_IDLE) updater_check_start();
+}
+
+static void openUpdate() {
+  mode = M_UPDATE;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Software update");
+  updTitle = label(s, "", &font_tdos_20, TEXT);
+  lv_obj_set_pos(updTitle, 16, 76);
+  updDetail = label(s, "", &font_tdos_14, MUTE);
+  lv_obj_set_width(updDetail, 288);
+  lv_obj_set_pos(updDetail, 16, 108);
+  updBar = lv_bar_create(s);
+  lv_obj_set_size(updBar, 288, 12);
+  lv_obj_set_pos(updBar, 16, 160);
+  lv_bar_set_range(updBar, 0, 100);
+  lv_obj_set_style_radius(updBar, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_radius(updBar, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(updBar, C(RAISE2), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(updBar, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(updBar, C(ACCENT), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(updBar, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_add_flag(updBar, LV_OBJ_FLAG_HIDDEN);
+  updBtn = tappable(box(s, 296, 40, ACCENT, 14));
+  lv_obj_set_pos(updBtn, 12, 194);
+  updBtnLbl = label(updBtn, "", &font_tdos_16, INK);
+  lv_obj_center(updBtnLbl);
+  lv_obj_add_event_cb(updBtn, updBtnCb, LV_EVENT_CLICKED, nullptr);
+  updDoneAt = 0;
+  if (cfg().wifiSsid[0]) updater_check_start();
+  loadApp(s);
+}
+
+// Called from ui_tick while one of these screens is up.
+static void netScreenTick() {
+  static uint32_t last = 0;
+  if (millis() - last < 250) return;
+  last = millis();
+  if (mode == M_WIFI) {
+    if (!updater_scan_done()) return;
+    int n = updater_scan_count();
+    bool haveSaved = cfg().wifiSsid[0] != 0;
+    if (n == 0 && !haveSaved) { openSettings(); toast("No networks found"); return; }
+    int k = 0;
+    if (haveSaved) snprintf(pickBuf[k++], sizeof(pickBuf[0]), "Forget saved network");
+    for (int i = 0; i < n && k < 24; i++) {
+      int r = updater_scan_rssi(i);
+      snprintf(pickBuf[k++], sizeof(pickBuf[0]), "%.20s  %s", updater_scan_ssid(i), r > -60 ? "strong" : r > -75 ? "ok" : "weak");
+    }
+    openPicker("Choose a WiFi network", k, haveSaved ? -1 : 0, pickWifi, M_SETTINGS);
+    return;
+  }
+  if (mode != M_UPDATE || !updTitle) return;
+  const UpStatus& u = updater_status();
+  char b[96];
+  bool bar = false, btn = true;
+  const char* btnText = "";
+  if (!cfg().wifiSsid[0]) {
+    lv_label_set_text(updTitle, "WiFi is not set up");
+    lv_label_set_text(updDetail, "Choose a network first. It is only used to download updates.");
+    btnText = "Set up WiFi";
+  } else switch (u.state) {
+    case UP_IDLE:
+    case UP_CONNECTING:
+      lv_label_set_text(updTitle, "Connecting...");
+      snprintf(b, sizeof(b), "Joining %s", cfg().wifiSsid);
+      lv_label_set_text(updDetail, b);
+      btn = false;
+      break;
+    case UP_CHECKING:
+      lv_label_set_text(updTitle, "Checking for updates...");
+      lv_label_set_text(updDetail, "");
+      btn = false;
+      break;
+    case UP_UPTODATE:
+      lv_label_set_text(updTitle, "You are up to date");
+      snprintf(b, sizeof(b), "Version %s", TDOS_VERSION);
+      lv_label_set_text(updDetail, b);
+      btnText = "Check again";
+      break;
+    case UP_AVAILABLE:
+      lv_label_set_text(updTitle, "Update available");
+      snprintf(b, sizeof(b), "Version %s, %lu KB.\nYou have %s. The device restarts when it is done.", u.version, (unsigned long)(u.size / 1024), TDOS_VERSION);
+      lv_label_set_text(updDetail, b);
+      btnText = "Install";
+      break;
+    case UP_DOWNLOADING:
+      lv_label_set_text(updTitle, "Downloading...");
+      snprintf(b, sizeof(b), "%lu of %lu KB. Keep the device on.", (unsigned long)(u.done / 1024), (unsigned long)(u.size / 1024));
+      lv_label_set_text(updDetail, b);
+      lv_bar_set_value(updBar, u.size ? (int)((uint64_t)u.done * 100 / u.size) : 0, LV_ANIM_OFF);
+      bar = true;
+      btn = false;
+      break;
+    case UP_VERIFYING:
+      lv_label_set_text(updTitle, "Checking the download...");
+      lv_label_set_text(updDetail, "");
+      btn = false;
+      break;
+    case UP_DONE:
+      lv_label_set_text(updTitle, "Update installed");
+      lv_label_set_text(updDetail, "Restarting...");
+      btn = false;
+      if (!updDoneAt) updDoneAt = millis();
+      else if (millis() - updDoneAt > 1500) ESP.restart();
+      break;
+    case UP_ERROR:
+      lv_label_set_text(updTitle, "Update failed");
+      lv_label_set_text(updDetail, u.msg);
+      btnText = "Try again";
+      break;
+  }
+  if (bar) lv_obj_clear_flag(updBar, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(updBar, LV_OBJ_FLAG_HIDDEN);
+  if (btn) { lv_obj_clear_flag(updBtn, LV_OBJ_FLAG_HIDDEN); lv_label_set_text(updBtnLbl, btnText); lv_obj_center(updBtnLbl); }
+  else lv_obj_add_flag(updBtn, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void pickZone(int i) {
   cfg().tzMinutes = zones[constrain(i, 0, ZONE_N - 1)].minutes;
   settings_changed();
@@ -1613,15 +1780,17 @@ static void fillSettings() {
   addRow("Channel sounds", chNames[constrain(c.channelSound, 0, 2)], ROW_CHSOUND, K_NAV);
   addRow("Screen timeout", TIMEOUT_NAMES[constrain((int)c.screenTimeout, 0, TIMEOUT_N - 1)], ROW_TIMEOUT, K_NAV);
   addRow("Screen off", SCREENOFF_NAMES[constrain((int)c.screenOff, 0, SCREENOFF_N - 1)], ROW_SCREENOFF, K_NAV);
+  addRow("WiFi", c.wifiSsid[0] ? c.wifiSsid : "Not set", ROW_WIFI, K_NAV);
+  addRow("Software update", TDOS_VERSION, ROW_UPDATE, K_NAV);
   int p = presetIndex();
   addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
   snprintf(b, sizeof(b), "%d%%", lastBatt);
   addRow("Battery", b, ROW_BATT, K_INFO);
   addRow("History", lastStorage, ROW_ABOUT, K_INFO);
 #ifdef TDOS_REMOTE
-  addRow("About", "tdeck-os 0.1 debug", ROW_ABOUT, K_INFO);     // remote control is compiled in
+  addRow("About", "tdeck-os " TDOS_VERSION " debug", ROW_ABOUT, K_INFO);     // remote control is compiled in
 #else
-  addRow("About", "tdeck-os 0.1", ROW_ABOUT, K_INFO);
+  addRow("About", "tdeck-os " TDOS_VERSION, ROW_ABOUT, K_INFO);
 #endif
   addRow("Last start", diag_reason(), ROW_ABOUT, K_INFO);
   addRow("Advanced", "", ROW_ADV, K_NAV);
@@ -1801,6 +1970,8 @@ static void settingsAct(int id) {
       for (int i = 0; i < SCREENOFF_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", SCREENOFF_NAMES[i]);
       openPicker("Screen off after the clock", SCREENOFF_N, constrain((int)c.screenOff, 0, SCREENOFF_N - 1), pickScreenOff, M_SETTINGS);
       return;
+    case ROW_WIFI: openWifiScan(); return;
+    case ROW_UPDATE: openUpdate(); return;
     case ROW_ADV: openPin(); return;
     default: return;                                          // read-only rows
   }
@@ -2683,7 +2854,8 @@ void ui_tick() {
   runGesture();
   mapview_tick();
   uint32_t idleS = TIMEOUT_SECONDS[constrain((int)cfg().screenTimeout, 0, TIMEOUT_N - 1)];
-  if (idleS && mode != M_LOCK && millis() - lastActivityMs > idleS * 1000UL) goLock();
+  if (idleS && mode != M_LOCK && mode != M_UPDATE && millis() - lastActivityMs > idleS * 1000UL) goLock();
+  if (mode == M_WIFI || mode == M_UPDATE) netScreenTick();
   uint32_t offS = SCREENOFF_SECONDS[constrain((int)cfg().screenOff, 0, SCREENOFF_N - 1)];
   if (mode == M_LOCK && !screenOff && offS && millis() - lockedAtMs > offS * 1000UL) {
     setBacklight(0);                                  // nobody is looking: the backlight is the biggest draw
@@ -2884,7 +3056,7 @@ void ui_key(char c) {
     if (c == 8 || c == 127) { if (pinLen == 0) goBack(); else ui_pin_key(9); return; }
     return;
   }
-  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS || mode == M_DETAIL) && (c == 8 || c == 127)) { goBack(); return; }
+  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS || mode == M_DETAIL || mode == M_UPDATE || mode == M_WIFI) && (c == 8 || c == 127)) { goBack(); return; }
 }
 
 bool ui_console_active() { return mode == M_DBG; }
