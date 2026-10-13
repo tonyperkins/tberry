@@ -85,7 +85,7 @@ static lv_obj_t *brightSlider, *brightLbl;
 static int levelKind = 0;                // slider screen: 0 brightness, 1 volume
 static lv_obj_t *barGps, *barGpsX;
 static lv_obj_t *nodesBox;
-static lv_obj_t *stVal[6], *stSub[6], *stPill, *stPillLbl, *stNote;
+static lv_obj_t *stVal[12], *stSub[12], *stPill, *stPillLbl, *stNote, *stBox;
 static UiModel stLast;                   // the latest model, for screens built after it arrived
 static lv_obj_t *sigTarget, *sigBtnLbl, *sigStatus, *sigVal[4];
 static int sigConv = -1;                 // conversation the range test goes to
@@ -219,7 +219,7 @@ static void releaseApp() {            // forget pointers into the app screen bef
   dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr;
   if (mapview_active()) mapview_destroy();
   listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
-  brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; stPill = nullptr; stNote = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
+  brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; stBox = nullptr; stPill = nullptr; stNote = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
   curConv = -1;
   msgs_set_open(-1);
 }
@@ -1389,6 +1389,47 @@ static void refreshStatus() {
     lv_label_set_text(stSub[5], "history is not saved");
   }
 
+  // GPS section
+  const char* fix = m.gpsFixType >= 3 ? "3D fix" : m.gpsFixType == 2 ? "2D fix"
+                  : m.gpsState == 2 ? "Fix" : m.gpsState == 1 ? "Searching" : "No data";
+  if (m.gpsState == 2) snprintf(c, sizeof(c), "updated %us ago", (unsigned)m.gpsFixAgeSec);
+  else snprintf(c, sizeof(c), m.gpsState == 1 ? "looking for satellites" : "module is silent");
+  lv_label_set_text(stVal[6], fix); lv_label_set_text(stSub[6], c);
+  lv_obj_set_style_text_color(stVal[6], C(m.gpsState == 2 ? GOOD : m.gpsState == 1 ? ACCENT : MUTE), 0);
+
+  snprintf(b, sizeof(b), "%u used", (unsigned)m.gpsSatsUsed);
+  snprintf(c, sizeof(c), "%u in view", (unsigned)m.gpsSatsView);
+  lv_label_set_text(stVal[7], b); lv_label_set_text(stSub[7], c);
+
+  if (m.gpsHdop > 0) {
+    snprintf(b, sizeof(b), "HDOP %.1f", m.gpsHdop);
+    const char* q = m.gpsHdop < 1.0f ? "excellent" : m.gpsHdop < 2.0f ? "good" : m.gpsHdop < 5.0f ? "moderate" : "poor";
+    snprintf(c, sizeof(c), "%s, about %d m", q, (int)lroundf(m.gpsHdop * 5.0f));
+  } else {
+    snprintf(b, sizeof(b), "-"); snprintf(c, sizeof(c), "no estimate yet");
+  }
+  lv_label_set_text(stVal[8], b); lv_label_set_text(stSub[8], c);
+
+  if (m.gpsState == 2) {
+    snprintf(b, sizeof(b), "%.0f m", m.gpsAltM);
+    snprintf(c, sizeof(c), "%.0f ft", m.gpsAltM * 3.28084f);
+  } else { snprintf(b, sizeof(b), "-"); c[0] = 0; }
+  lv_label_set_text(stVal[9], b); lv_label_set_text(stSub[9], c);
+
+  if (m.gpsState == 2) {
+    snprintf(b, sizeof(b), "%.1f km/h", m.gpsSpeedKmh);
+    if (m.gpsSpeedKmh > 2.0f) snprintf(c, sizeof(c), "heading %d deg", (int)lroundf(m.gpsCourse));
+    else snprintf(c, sizeof(c), "stationary");
+  } else { snprintf(b, sizeof(b), "-"); c[0] = 0; }
+  lv_label_set_text(stVal[10], b); lv_label_set_text(stSub[10], c);
+
+  if (m.hasPos) {
+    double la = m.latE6 / 1e6, lo = m.lonE6 / 1e6;
+    snprintf(b, sizeof(b), "%.4f %c", fabs(la), la >= 0 ? 'N' : 'S');
+    snprintf(c, sizeof(c), "%.4f %c", fabs(lo), lo >= 0 ? 'E' : 'W');
+  } else { snprintf(b, sizeof(b), "-"); c[0] = 0; }
+  lv_label_set_text(stVal[11], b); lv_label_set_text(stSub[11], c);
+
   // Healthy means: no long stalls, memory not running out, and the radio is working.
   bool stalls = m.loopWorstMs > 400;
   bool lowMem = m.heapKb < 40;
@@ -1401,14 +1442,26 @@ static void refreshStatus() {
   lv_label_set_text(stNote, b);
 }
 
+// A scrolling page: the device's health first, then what the GPS module reports.
 static void openStatus() {
   mode = M_STATUS;
   lv_obj_t* s = newScreen();
   headerFor(s, "Status");
-  const char* titles[6] = { "BATTERY", "UPTIME", "HEARD", "PACKETS", "RADIO", "STORAGE" };
-  for (int i = 0; i < 6; i++) {
-    lv_obj_t* t = box(s, 154, 46, RAISE, 12);
-    lv_obj_set_pos(t, 4 + (i % 2) * 158, 60 + (i / 2) * 50);
+  stBox = lv_obj_create(s);
+  lv_obj_set_size(stBox, 320, 240 - 58);
+  lv_obj_set_pos(stBox, 0, 58);
+  lv_obj_set_style_bg_opa(stBox, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(stBox, 0, 0);
+  lv_obj_set_style_pad_all(stBox, 0, 0);
+  lv_obj_set_scrollbar_mode(stBox, LV_SCROLLBAR_MODE_OFF);
+
+  const char* titles[12] = { "BATTERY", "UPTIME", "HEARD", "PACKETS", "RADIO", "STORAGE",
+                             "GPS FIX", "SATELLITES", "ACCURACY", "ALTITUDE", "SPEED", "POSITION" };
+  for (int i = 0; i < 12; i++) {
+    int row = i / 2, col = i % 2;
+    int y = 4 + row * 50 + (i >= 6 ? 54 : 0);            // a gap after the health tiles for the strip
+    lv_obj_t* t = box(stBox, 154, 46, RAISE, 12);
+    lv_obj_set_pos(t, 4 + col * 158, y);
     lv_obj_t* cap = label(t, titles[i], &font_tdos_12, MUTE);
     lv_obj_set_pos(cap, 10, 3);
     stVal[i] = label(t, "-", &font_tdos_14, TEXT);
@@ -1420,14 +1473,16 @@ static void openStatus() {
     lv_obj_set_width(stSub[i], 136);
     lv_label_set_long_mode(stSub[i], LV_LABEL_LONG_CLIP);
   }
-  stPill = box(s, 76, 22, GOOD, 11);
-  lv_obj_set_pos(stPill, 6, 214);
+  stPill = box(stBox, 76, 22, GOOD, 11);
+  lv_obj_set_pos(stPill, 6, 158);
   stPillLbl = label(stPill, "Healthy", &font_tdos_12, INK);
   lv_obj_center(stPillLbl);
-  stNote = label(s, "", &font_tdos_12, MUTE);
-  lv_obj_set_pos(stNote, 90, 217);
+  stNote = label(stBox, "", &font_tdos_12, MUTE);
+  lv_obj_set_pos(stNote, 90, 161);
   lv_obj_set_width(stNote, 226);
   lv_label_set_long_mode(stNote, LV_LABEL_LONG_CLIP);
+  lv_obj_t* gps = label(stBox, "GPS", &font_tdos_12, ACCENT);
+  lv_obj_set_pos(gps, 10, 188);
   refreshStatus();
   loadApp(s);
 }
@@ -1803,6 +1858,10 @@ void ui_update(const UiModel& m) {
   stLast.uptimeSec = m.uptimeSec; stLast.packetsRx = m.packetsRx; stLast.packetsTx = m.packetsTx;
   stLast.rxErrors = m.rxErrors; stLast.airtimeMs = m.airtimeMs; stLast.loopWorstMs = m.loopWorstMs;
   stLast.heapKb = m.heapKb; stLast.psramKb = m.psramKb; stLast.timeSource = m.timeSource; stLast.sdReady = m.sdReady; stLast.sdFreeMb = m.sdFreeMb;
+  stLast.gpsState = m.gpsState; stLast.gpsFixType = m.gpsFixType; stLast.gpsSatsUsed = m.gpsSatsUsed;
+  stLast.gpsSatsView = m.gpsSatsView; stLast.gpsHdop = m.gpsHdop; stLast.gpsAltM = m.gpsAltM;
+  stLast.gpsSpeedKmh = m.gpsSpeedKmh; stLast.gpsCourse = m.gpsCourse; stLast.gpsFixAgeSec = m.gpsFixAgeSec;
+  stLast.hasPos = m.hasPos; stLast.latE6 = m.latE6; stLast.lonE6 = m.lonE6;
   if (mode == M_STATUS) refreshStatus();
   mapview_update(m);
   if (mode == M_SIGNAL && sigStatus && (sig_version() != sigShownVersion || sig_pending())) {
@@ -1850,6 +1909,8 @@ void ui_nav(int dx, int dy) {
       listHighlight();
       lv_obj_scroll_to_y(listBox, max(0, listSel * 38 - 76), LV_ANIM_OFF);
     }
+  } else if (mode == M_STATUS && dy && stBox) {
+    lv_obj_scroll_by(stBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_MAP) {
     mapview_pan(dx * 48, dy * 48);
   } else if (mode == M_NODES && dy && nodesBox) {

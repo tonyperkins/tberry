@@ -367,51 +367,106 @@ static bool gpsFix = false;
 static uint32_t gpsFixMs = 0;
 static int32_t gpsLatE6 = 0, gpsLonE6 = 0;      // last position, micro-degrees
 static uint32_t gpsByteMs = 0;                   // when the module last sent anything at all
+// What the GPS module has told us beyond the position, for the Status screen.
+struct GpsInfo {
+  uint8_t fixType = 0;            // from GSA: 1 none, 2 = 2D, 3 = 3D
+  uint8_t quality = 0;            // from GGA: 0 none, 1 GPS, 2 differential
+  uint8_t satsUsed = 0;
+  float hdop = 0, altM = 0, speedKmh = 0, courseDeg = 0;
+  struct { char talker[3]; uint8_t inView; uint32_t ms; } view[6] = {};   // one slot per constellation
+} gpsInfo;
+
+static uint8_t satsInView() {
+  uint32_t now = millis();
+  int total = 0;
+  for (auto& v : gpsInfo.view) if (v.talker[0] && now - v.ms < 15000) total += v.inView;
+  return (uint8_t)min(total, 99);
+}
+
+static double nmeaDegrees(const char* s, char hemi) {
+  double v = atof(s);
+  double d = floor(v / 100.0) + fmod(v, 100.0) / 60.0;
+  return (hemi == 'S' || hemi == 'W') ? -d : d;
+}
+
+// One complete sentence, e.g. "$GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,,,A*6A".
+static void handleNmea(char* line, int n) {
+  if (n < 10 || line[0] != '$') return;
+  line[n] = 0;
+  char* star = strchr(line, '*');
+  if (star) *star = 0;
+  char* f[24];
+  int nf = 0;
+  char* p = line;
+  while (nf < 24) { f[nf++] = p; p = strchr(p, ','); if (!p) break; *p++ = 0; }
+  const char* type = line + 3;                   // after "$GN" / "$GP" / "$GL" ...
+  auto num = [&](int i) { return i < nf ? atof(f[i]) : 0.0; };
+
+  if (memcmp(type, "RMC", 3) == 0) {
+    if (nf < 10 || f[2][0] != 'A' || strlen(f[1]) < 6 || strlen(f[9]) < 6) return;
+    struct tm t = {};
+    t.tm_hour = (f[1][0] - '0') * 10 + (f[1][1] - '0');
+    t.tm_min  = (f[1][2] - '0') * 10 + (f[1][3] - '0');
+    t.tm_sec  = (f[1][4] - '0') * 10 + (f[1][5] - '0');
+    t.tm_mday = (f[9][0] - '0') * 10 + (f[9][1] - '0');
+    t.tm_mon  = (f[9][2] - '0') * 10 + (f[9][3] - '0') - 1;
+    t.tm_year = 100 + (f[9][4] - '0') * 10 + (f[9][5] - '0');
+    time_t epoch = mktime(&t);                   // the ESP32 default timezone is UTC
+    if (nf >= 7 && strlen(f[3]) > 4 && strlen(f[5]) > 5) {
+      gpsLatE6 = (int32_t)lround(nmeaDegrees(f[3], f[4][0]) * 1e6);
+      gpsLonE6 = (int32_t)lround(nmeaDegrees(f[5], f[6][0]) * 1e6);
+    }
+    gpsInfo.speedKmh = (float)(num(7) * 1.852);   // knots -> km/h
+    gpsInfo.courseDeg = (float)num(8);
+    if (epoch > 1700000000L) {
+      if (!gpsFix) audio_play(SND_GPS_LOCK);
+      gpsFix = true;
+      gpsFixMs = millis();
+      int32_t diff = (int32_t)(epoch - (time_t)rtc.getCurrentTime());
+      if (diff > 2 || diff < -2) rtc.setCurrentTime((uint32_t)epoch);
+    }
+  } else if (memcmp(type, "GGA", 3) == 0) {
+    gpsInfo.quality = (uint8_t)num(6);
+    gpsInfo.satsUsed = (uint8_t)num(7);
+    gpsInfo.hdop = (float)num(8);
+    gpsInfo.altM = (float)num(9);
+  } else if (memcmp(type, "GSA", 3) == 0) {
+    gpsInfo.fixType = (uint8_t)num(2);
+  } else if (memcmp(type, "GSV", 3) == 0) {
+    // field 3 is the number of satellites in view for this constellation (the talker id)
+    const char* talker = line + 1;
+    int slot = -1;
+    for (int k = 0; k < 6; k++) {
+      if (gpsInfo.view[k].talker[0] && memcmp(gpsInfo.view[k].talker, talker, 2) == 0) { slot = k; break; }
+      if (slot < 0 && !gpsInfo.view[k].talker[0]) slot = k;
+    }
+    if (slot >= 0) {
+      memcpy(gpsInfo.view[slot].talker, talker, 2);
+      gpsInfo.view[slot].talker[2] = 0;
+      gpsInfo.view[slot].inView = (uint8_t)num(3);
+      gpsInfo.view[slot].ms = millis();
+    }
+  }
+}
+
 static void pollGps() {
-  static char line[96];
+  static char line[120];
   static int n = 0;
-  int budget = 128;
+  int budget = 160;
   while (Serial1.available() && budget-- > 0) {
     char c = Serial1.read();
     gpsByteMs = millis();
     if (c == '\n' || c == '\r') {
-      if (n > 6 && line[0] == '$' && (memcmp(line + 3, "RMC", 3) == 0)) {
-        line[n] = 0;
-        char* f[12]; int nf = 0; char* p = line;
-        while (nf < 12) { f[nf++] = p; p = strchr(p, ','); if (!p) break; *p++ = 0; }
-        if (nf >= 10 && f[2][0] == 'A' && strlen(f[1]) >= 6 && strlen(f[9]) >= 6) {
-          struct tm t = {};
-          t.tm_hour = (f[1][0] - '0') * 10 + (f[1][1] - '0');
-          t.tm_min  = (f[1][2] - '0') * 10 + (f[1][3] - '0');
-          t.tm_sec  = (f[1][4] - '0') * 10 + (f[1][5] - '0');
-          t.tm_mday = (f[9][0] - '0') * 10 + (f[9][1] - '0');
-          t.tm_mon  = (f[9][2] - '0') * 10 + (f[9][3] - '0') - 1;
-          t.tm_year = 100 + (f[9][4] - '0') * 10 + (f[9][5] - '0');
-          time_t epoch = mktime(&t);                 // the ESP32 default timezone is UTC
-          // position: ddmm.mmmm,N,dddmm.mmmm,E
-          if (nf >= 7 && strlen(f[3]) > 4 && strlen(f[5]) > 5) {
-            double la = atof(f[3]), lo = atof(f[5]);
-            double lat = floor(la / 100.0) + fmod(la, 100.0) / 60.0;
-            double lon = floor(lo / 100.0) + fmod(lo, 100.0) / 60.0;
-            if (f[4][0] == 'S') lat = -lat;
-            if (f[6][0] == 'W') lon = -lon;
-            gpsLatE6 = (int32_t)lround(lat * 1e6);
-            gpsLonE6 = (int32_t)lround(lon * 1e6);
-          }
-          if (epoch > 1700000000L) {
-            if (!gpsFix) audio_play(SND_GPS_LOCK);
-            gpsFix = true; gpsFixMs = millis();
-            int32_t diff = (int32_t)(epoch - (time_t)rtc.getCurrentTime());
-            if (diff > 2 || diff < -2) rtc.setCurrentTime((uint32_t)epoch);
-          }
-        }
-      }
+      if (n > 0) handleNmea(line, n);
       n = 0;
     } else if (n < (int)sizeof(line) - 1) {
       line[n++] = c;
     }
   }
-  if (gpsFix && millis() - gpsFixMs > 30000) gpsFix = false;
+  if (gpsFix && millis() - gpsFixMs > 30000) {
+    gpsFix = false;
+    gpsInfo.fixType = 0;
+  }
 }
 
 static void pollKeyboard() {
@@ -492,6 +547,14 @@ static void buildModel(UiModel& m) {
   m.sdReady = storage_ready();
   m.hasPos = gpsFix && (gpsLatE6 || gpsLonE6);
   m.gpsState = gpsFix ? 2 : (gpsByteMs && millis() - gpsByteMs < 5000 ? 1 : 0);
+  m.gpsFixType = gpsInfo.fixType;
+  m.gpsSatsUsed = gpsInfo.satsUsed;
+  m.gpsSatsView = satsInView();
+  m.gpsHdop = gpsInfo.hdop;
+  m.gpsAltM = gpsInfo.altM;
+  m.gpsSpeedKmh = gpsInfo.speedKmh;
+  m.gpsCourse = gpsInfo.courseDeg;
+  m.gpsFixAgeSec = gpsFixMs ? (millis() - gpsFixMs) / 1000 : 0;
   m.latE6 = gpsLatE6;
   m.lonE6 = gpsLonE6;
   m.sdFreeMb = storage_free_mb();

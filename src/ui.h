@@ -25,6 +25,10 @@ struct UiModel {
   uint32_t sdFreeMb = 0;
   bool hasPos = false;       // a current GPS position
   uint8_t gpsState = 0;      // 0 no data from the module, 1 searching, 2 position fix
+  uint8_t gpsFixType = 0;    // 1 none, 2 = 2D, 3 = 3D
+  uint8_t gpsSatsUsed = 0, gpsSatsView = 0;
+  float gpsHdop = 0, gpsAltM = 0, gpsSpeedKmh = 0, gpsCourse = 0;
+  uint32_t gpsFixAgeSec = 0; // seconds since the last valid position sentence
   int32_t latE6 = 0, lonE6 = 0;
   char consoleText[720] = {0};   // text shown by the debug console
 };
