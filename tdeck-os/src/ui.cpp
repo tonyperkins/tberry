@@ -174,6 +174,21 @@ static lv_obj_t* label(lv_obj_t* parent, const char* txt, const lv_font_t* font,
   lv_obj_set_style_text_color(l, C(col), 0);
   return l;
 }
+// Slider in the app's style: a rounded track, amber fill and a round white knob. Without the LVGL
+// theme every part defaults to square corners, so the radius has to be set on all three.
+static void styleSlider(lv_obj_t* sl, int knobPad) {
+  lv_obj_set_style_radius(sl, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_radius(sl, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+  lv_obj_set_style_radius(sl, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+  lv_obj_set_style_bg_color(sl, C(RAISE2), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(sl, C(ACCENT), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(sl, C(TEXT), LV_PART_KNOB);
+  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_KNOB);
+  lv_obj_set_style_border_width(sl, 0, LV_PART_KNOB);
+  lv_obj_set_style_pad_all(sl, knobPad, LV_PART_KNOB);
+}
 // The T-Deck backlight is an LED driver with a single-wire, pulse-counting interface: each low
 // pulse steps the level down (wrapping around), 16 levels. It is not a PWM input, so driving it
 // with PWM makes the brightness jump around.
@@ -1344,13 +1359,7 @@ static void openLevel(int kind) {
   lv_obj_align(brightSlider, LV_ALIGN_CENTER, 0, 44);
   lv_slider_set_range(brightSlider, lo, hi);
   lv_slider_set_value(brightSlider, cur, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(brightSlider, C(RAISE2), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(brightSlider, C(ACCENT), LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_color(brightSlider, C(TEXT), LV_PART_KNOB);
-  lv_obj_set_style_bg_opa(brightSlider, LV_OPA_COVER, LV_PART_KNOB);
-  lv_obj_set_style_pad_all(brightSlider, 6, LV_PART_KNOB);
+  styleSlider(brightSlider, 6);
   lv_obj_add_event_cb(brightSlider, brightCb, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(brightSlider, brightReleaseCb, LV_EVENT_RELEASED, nullptr);
   lv_obj_t* hint = label(s, "Drag the bar, or roll the trackball sideways", &font_tdos_12, MUTE);
@@ -2212,13 +2221,7 @@ static void openQuick() {
   lv_obj_set_pos(sl, 46, 36);
   lv_slider_set_range(sl, 1, 16);
   lv_slider_set_value(sl, cfg().brightness, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(sl, C(RAISE2), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(sl, C(ACCENT), LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_color(sl, C(TEXT), LV_PART_KNOB);
-  lv_obj_set_style_bg_opa(sl, LV_OPA_COVER, LV_PART_KNOB);
-  lv_obj_set_style_pad_all(sl, 5, LV_PART_KNOB);
+  styleSlider(sl, 5);
   lv_obj_add_event_cb(sl, quickBrightCb, LV_EVENT_VALUE_CHANGED, nullptr);
 
   lv_obj_t* spk = label(panel, LV_SYMBOL_VOLUME_MAX, &font_tdos_14, TEXT);
@@ -2228,13 +2231,7 @@ static void openQuick() {
   lv_obj_set_pos(vs, 46, 64);
   lv_slider_set_range(vs, 0, 10);
   lv_slider_set_value(vs, cfg().volume / 10, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(vs, C(RAISE2), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(vs, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(vs, C(ACCENT), LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(vs, LV_OPA_COVER, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_color(vs, C(TEXT), LV_PART_KNOB);
-  lv_obj_set_style_bg_opa(vs, LV_OPA_COVER, LV_PART_KNOB);
-  lv_obj_set_style_pad_all(vs, 5, LV_PART_KNOB);
+  styleSlider(vs, 5);
   lv_obj_add_event_cb(vs, quickVolumeCb, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(vs, quickVolumeReleaseCb, LV_EVENT_RELEASED, nullptr);
 
