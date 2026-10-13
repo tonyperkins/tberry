@@ -24,7 +24,8 @@ struct UiModel {
   bool sdReady = false;
   uint32_t sdFreeMb = 0;
   bool hasPos = false;       // a current GPS position
-  uint8_t gpsState = 0;      // 0 no data from the module, 1 searching, 2 position fix
+  uint8_t gpsState = 0;      // 0 no data from the module, 1 searching, 2 position fix, 3 switched off
+  uint16_t gpsWindowSec = 0; // while GPS is off but in its start-up time window: seconds left
   uint8_t gpsFixType = 0;    // 1 none, 2 = 2D, 3 = 3D
   uint8_t gpsSatsUsed = 0, gpsSatsView = 0;
   float gpsHdop = 0, gpsAltM = 0, gpsSpeedKmh = 0, gpsCourse = 0;

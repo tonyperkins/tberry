@@ -1,6 +1,6 @@
 # TDOS-009: GPS on/off switch in Settings and the quick panel
 
-**Type:** feature  **Status:** open  **Area:** Settings, quick panel, GPS, power
+**Type:** feature  **Status:** done (needs on-device verification of the power saving)  **Area:** Settings, quick panel, GPS, power
 
 ## Why
 The GPS module keeps the receiver running and the device parsing NMEA all the time. Indoors it never
@@ -50,6 +50,18 @@ shows no time until GPS or the mesh provides one. The GPS is the quickest reliab
 - With GPS off and a clear sky, the clock is set by GPS within the window and the module then sleeps.
 - With GPS off and no sky view, the window times out at the configured length and the module sleeps.
 - Position is not used anywhere while off (range-test logs record no coordinates, once they have any).
+
+## As built
+- **The module is a u-blox M10** (it answers a version poll with `ROM SPG 5.10`, protocol 34.10, and
+  rejects the MediaTek `PMTK` commands the earlier note assumed).
+- Idling uses `UBX-CFG-RST` (class 0x06, id 0x04): reset mode **0x08 controlled GNSS stop**, and
+  **0x09 controlled GNSS start** to resume. The module keeps its UART alive and its satellite data, so
+  there is no wake-up problem and a restart is quick.
+- `gpsEnabled` in Settings (default on, migration from older files). `gpsPolicyTick()` in main.cpp
+  runs every pass: wanted = setting on, or the start-up window is open.
+- The start-up window is 120 s, ends early when a valid GPS time has set the clock.
+- Top bar: state 3 is a dim grey without a cross. Status: "GPS off", or "start-up window, N s left".
+- Not done: the optional "on for 5 minutes" mode.
 
 ## Technical notes
 - **Software only** (stop parsing, hide markers) saves nothing: the module still draws power.

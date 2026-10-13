@@ -685,7 +685,7 @@ static constexpr int ZONE_N = sizeof(zones) / sizeof(zones[0]);
 static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f, 125.0f, 250.0f, 500.0f };
 static constexpr int BW_N = 10;
 
-enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
+enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
 enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
@@ -1001,6 +1001,7 @@ static void fillSettings() {
   else snprintf(b, sizeof(b), "%s", off);
   addRow("Time zone", b, ROW_TZ, K_NAV);
   addRow("Daylight saving", c.dst ? "On" : "Off", ROW_DST, K_VALUE, c.dst);
+  addRow("GPS", c.gpsEnabled ? "On" : "Off", ROW_GPS, K_VALUE, c.gpsEnabled);
   snprintf(b, sizeof(b), "%d%%", c.brightness * 100 / 16);
   addRow("Brightness", b, ROW_BRIGHT, K_NAV);
   if (c.volume == 0) snprintf(b, sizeof(b), "Muted");
@@ -1170,6 +1171,9 @@ static void settingsAct(int id) {
     }
     case ROW_DST:
       c.dst = c.dst ? 0 : 1;
+      break;
+    case ROW_GPS:                              // main.cpp's GPS policy reads this every pass
+      c.gpsEnabled = c.gpsEnabled ? 0 : 1;
       break;
     case ROW_BRIGHT: openLevel(0); return;
     case ROW_VOLUME: openLevel(1); return;
@@ -1494,9 +1498,11 @@ static void refreshStatus() {
   }
 
   // GPS section
-  const char* fix = m.gpsState != 2 ? (m.gpsState == 1 ? "Searching" : "No data")
+  const char* fix = m.gpsState == 3 ? "GPS off" : m.gpsState != 2 ? (m.gpsState == 1 ? "Searching" : "No data")
                   : m.gpsFixType >= 3 ? "3D fix" : "2D fix";
-  if (m.gpsState == 2) snprintf(c, sizeof(c), "updated %us ago", (unsigned)m.gpsFixAgeSec);
+  if (m.gpsWindowSec > 0) snprintf(c, sizeof(c), "start-up window, %us left", (unsigned)m.gpsWindowSec);
+  else if (m.gpsState == 3) snprintf(c, sizeof(c), "switched off in Settings");
+  else if (m.gpsState == 2) snprintf(c, sizeof(c), "updated %us ago", (unsigned)m.gpsFixAgeSec);
   else snprintf(c, sizeof(c), m.gpsState == 1 ? "looking for satellites" : "module is silent");
   lv_label_set_text(stVal[6], fix); lv_label_set_text(stSub[6], c);
   lv_obj_set_style_text_color(stVal[6], C(m.gpsState == 2 ? GOOD : m.gpsState == 1 ? ACCENT : MUTE), 0);
@@ -1602,6 +1608,7 @@ static void openStatus() {
 // ── Quick panel: swipe down from the top edge ────────────────────
 static lv_obj_t *quickBackdrop = nullptr;
 static bool quickOpen = false;
+static lv_obj_t *quickGpsIcon = nullptr, *quickGpsText = nullptr;
 
 static void closeQuick(bool immediate = false) {
   if (!quickOpen) return;
@@ -1630,6 +1637,13 @@ static void quickAdvertCb(lv_event_t*) {
   if (actions.advertise) actions.advertise();
   closeQuick();
   toast("Advert sent");
+}
+// Toggles in place: the panel stays open so the change is visible, and main.cpp acts on the setting.
+static void quickGpsCb(lv_event_t*) {
+  cfg().gpsEnabled = cfg().gpsEnabled ? 0 : 1;
+  settings_changed();
+  if (quickGpsIcon) lv_obj_set_style_text_color(quickGpsIcon, C(cfg().gpsEnabled ? GOOD : 0x3A4658), 0);
+  if (quickGpsText) lv_label_set_text(quickGpsText, cfg().gpsEnabled ? "GPS on" : "GPS off");
 }
 static void quickLockCb(lv_event_t*) { closeQuick(); pendingGesture = G_NONE; goLock(); }
 static void quickSettingsCb(lv_event_t*) { closeQuick(); openSettings(); }
@@ -1682,18 +1696,22 @@ static void openQuick() {
   lv_obj_add_event_cb(vs, quickVolumeReleaseCb, LV_EVENT_RELEASED, nullptr);
 
   struct Btn { const char* text; const char* sym; lv_event_cb_t cb; };
-  const Btn btns[3] = {
+  const Btn btns[4] = {
     { "Advert", LV_SYMBOL_UPLOAD, quickAdvertCb },
     { "Lock", LV_SYMBOL_POWER, quickLockCb },
+    { cfg().gpsEnabled ? "GPS on" : "GPS off", LV_SYMBOL_GPS, quickGpsCb },
     { "Settings", LV_SYMBOL_SETTINGS, quickSettingsCb },
   };
-  for (int i = 0; i < 3; i++) {
-    lv_obj_t* b = tappable(box(panel, 96, 52, RAISE2, 14));
-    lv_obj_set_pos(b, 10 + i * 104, 92);
-    lv_obj_t* ic = label(b, btns[i].sym, &font_tdos_16, ACCENT);
+  for (int i = 0; i < 4; i++) {
+    lv_obj_t* b = tappable(box(panel, 74, 52, RAISE2, 14));
+    lv_obj_set_pos(b, 6 + i * 78, 92);
+    bool isGps = (i == 2);
+    uint32_t iconCol = isGps ? (cfg().gpsEnabled ? GOOD : 0x3A4658) : ACCENT;
+    lv_obj_t* ic = label(b, btns[i].sym, &font_tdos_16, iconCol);
     lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
     lv_obj_t* tx = label(b, btns[i].text, &font_tdos_12, TEXT);
     lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -6);
+    if (isGps) { quickGpsIcon = ic; quickGpsText = tx; }
     lv_obj_add_event_cb(b, btns[i].cb, LV_EVENT_CLICKED, nullptr);
   }
 
@@ -1937,11 +1955,11 @@ void ui_update(const UiModel& m) {
   lv_obj_align_to(barSig, barBatt, LV_ALIGN_OUT_LEFT_MID, -10, 0);
   {
     bool pulse = (millis() / 500) % 2;
-    uint32_t col = m.gpsState == 2 ? GOOD : m.gpsState == 1 ? (pulse ? ACCENT : MUTE) : MUTE;
+    uint32_t col = m.gpsState == 2 ? GOOD : m.gpsState == 1 ? (pulse ? ACCENT : MUTE) : m.gpsState == 3 ? 0x3A4658 : MUTE;
     lv_obj_set_style_text_color(barGps, C(col), 0);
     lv_obj_align_to(barGps, barSig, LV_ALIGN_OUT_LEFT_MID, -10, 0);
     lv_obj_align_to(barGpsX, barGps, LV_ALIGN_CENTER, 0, 0);
-    if (m.gpsState == 0) lv_obj_clear_flag(barGpsX, LV_OBJ_FLAG_HIDDEN);
+    if (m.gpsState == 0) lv_obj_clear_flag(barGpsX, LV_OBJ_FLAG_HIDDEN);       // only "module silent" gets the cross
     else lv_obj_add_flag(barGpsX, LV_OBJ_FLAG_HIDDEN);
   }
 

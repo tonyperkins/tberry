@@ -20,6 +20,7 @@ struct Settings {
   int8_t txPower;          // dBm
   uint8_t volume;          // 0 (muted) to 100
   uint8_t channelSound;    // 0 never, 1 only when mentioned (default), 2 every channel message
+  uint8_t gpsEnabled;      // 0 off after the start-up time window, 1 always on (default)
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults

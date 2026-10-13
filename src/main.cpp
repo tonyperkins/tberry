@@ -401,7 +401,8 @@ static SimpleMeshTables tables;
 static DeckMesh* theMesh = nullptr;
 
 static bool radioOk = false, kbOk = false;
-static char i2cFound[96] = "";            // addresses that answered at boot, for diagnosis
+static char i2cFound[96] = "";
+            // addresses that answered at boot, for diagnosis
 static uint32_t loopMax = 0;          // worst pass since boot
 static uint32_t loopRecent = 0;       // worst pass in the current minute
 static uint32_t loopRecentShown = 0;  // the previous minute's value, which is what the UI reports
@@ -413,6 +414,37 @@ static int32_t gpsLatE6 = 0, gpsLonE6 = 0;      // last position, micro-degrees
 static uint32_t gpsByteMs = 0;                   // when the module last sent anything at all
 static bool gpsPosValid = false;                 // a trustworthy position (see evalGpsValidity)
 static uint32_t gpsPosMs = 0;                    // when it was last confirmed
+// ── GPS power policy (TDOS-009) ──────────────────────────────────
+// The module is a u-blox M10 (it identifies itself as "SPG 5.10"). "Controlled GNSS stop" idles the
+// receiver while leaving the UART alive, so there is nothing to wake and no way to lock it out; it
+// keeps its satellite data, so starting again is quick.
+//
+// At every boot the GPS runs for a start-up window whatever the setting says, because this device
+// has no clock chip and GPS is the quickest source of time. The window ends when GPS time arrives
+// or after GPS_WINDOW_MS. After that the setting is respected.
+static constexpr uint32_t GPS_WINDOW_MS = 120000;
+static bool gpsRunning = true;               // the module starts up tracking
+static bool gpsWindowOpen = true;
+static bool gpsTimeSeen = false;             // a valid GPS time has set the clock this session
+
+static void ubxSend(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len) {
+  uint8_t head[6] = { 0xB5, 0x62, cls, id, (uint8_t)(len & 0xFF), (uint8_t)(len >> 8) };
+  uint8_t a = 0, b = 0;                      // Fletcher checksum over class, id, length and payload
+  for (int i = 2; i < 6; i++) { a += head[i]; b += a; }
+  for (uint16_t i = 0; i < len; i++) { a += payload[i]; b += a; }
+  Serial1.write(head, sizeof(head));
+  if (len) Serial1.write(payload, len);
+  Serial1.write(a);
+  Serial1.write(b);
+}
+
+static void gpsSetRunning(bool run);
+
+static void gpsPolicyTick() {
+  if (gpsWindowOpen && (gpsTimeSeen || millis() > GPS_WINDOW_MS)) gpsWindowOpen = false;
+  gpsSetRunning(cfg().gpsEnabled || gpsWindowOpen);
+}
+
 // What the GPS module has told us beyond the position, for the Status screen.
 struct GpsInfo {
   uint8_t fixType = 0;            // from GSA: 1 none, 2 = 2D, 3 = 3D
@@ -453,9 +485,26 @@ static void evalGpsValidity() {
   }
 }
 
+static void gpsSetRunning(bool run) {
+  if (run == gpsRunning) return;
+  gpsRunning = run;
+  static const uint8_t stopMsg[4]  = { 0x00, 0x00, 0x08, 0x00 };   // UBX-CFG-RST: hot start, controlled GNSS stop
+  static const uint8_t startMsg[4] = { 0x00, 0x00, 0x09, 0x00 };   //              ... controlled GNSS start
+  ubxSend(0x06, 0x04, run ? startMsg : stopMsg, 4);
+  if (!run) {                                  // nothing the module says now is a position
+    gpsFix = false;
+    gpsPosValid = false;
+    gpsInfo.fixType = 0; gpsInfo.quality = 0; gpsInfo.satsUsed = 0; gpsInfo.hdop = 0;
+    gpsInfo.speedKmh = 0; gpsInfo.courseDeg = 0; gpsInfo.altM = 0;
+    for (auto& v : speedHist) v = 0;
+    for (auto& v : gpsInfo.view) v.talker[0] = 0;
+  }
+}
+
 // One complete sentence, e.g. "$GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,,,A*6A".
 static void handleNmea(char* line, int n) {
   if (n < 10 || line[0] != '$') return;
+  if (!gpsRunning) return;                       // stopped: whatever it still prints is not data
   line[n] = 0;
   char* star = strchr(line, '*');
   if (star) *star = 0;
@@ -487,6 +536,7 @@ static void handleNmea(char* line, int n) {
     gpsInfo.speedKmh = (speedHist[0] + speedHist[1] + speedHist[2]) / 3.0f;
     gpsInfo.courseDeg = (float)num(8);
     if (epoch > 1700000000L) {
+      gpsTimeSeen = true;
       gpsFix = true;
       gpsFixMs = millis();
       int32_t diff = (int32_t)(epoch - (time_t)rtc.getCurrentTime());
@@ -526,6 +576,7 @@ static void pollGps() {
   while (Serial1.available() && budget-- > 0) {
     char c = Serial1.read();
     gpsByteMs = millis();
+
     if (c == '\n' || c == '\r') {
       if (n > 0) handleNmea(line, n);
       n = 0;
@@ -617,7 +668,9 @@ static void buildModel(UiModel& m) {
   m.timeSource = gpsFix ? 2 : (m.clockValid ? 1 : 0);
   m.sdReady = storage_ready();
   m.hasPos = gpsPosValid && (gpsLatE6 || gpsLonE6);
-  m.gpsState = gpsPosValid ? 2 : (gpsByteMs && millis() - gpsByteMs < 5000 ? 1 : 0);
+  bool gpsOff = !cfg().gpsEnabled && !gpsWindowOpen;
+  m.gpsState = gpsOff ? 3 : gpsPosValid ? 2 : (gpsByteMs && millis() - gpsByteMs < 5000 ? 1 : 0);
+  m.gpsWindowSec = (!cfg().gpsEnabled && gpsWindowOpen && millis() < GPS_WINDOW_MS) ? (GPS_WINDOW_MS - millis()) / 1000 : 0;
   m.gpsFixType = gpsPosValid ? gpsInfo.fixType : 0;
   m.gpsSatsUsed = gpsInfo.satsUsed;
   m.gpsSatsView = satsInView();
@@ -742,6 +795,7 @@ void loop() {
   settings_tick();
   storage_tick();
   rtc.tick();
+  gpsPolicyTick();
   pollGps();
   pollKeyboard();
   pollTrackball();
