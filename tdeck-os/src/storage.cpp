@@ -230,6 +230,19 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
   f.close();
 }
 
+void storage_log_boot(const char* text) {
+  if (!ready || !text || !text[0]) return;
+  File f = SD.open("/tdos/boot.log", FILE_APPEND);
+  if (!f) return;
+  bool big = f.size() > 32 * 1024;
+  f.println(text);
+  f.close();
+  if (big) {                                  // keep two generations at most
+    SD.remove("/tdos/boot.old");
+    SD.rename("/tdos/boot.log", "/tdos/boot.old");
+  }
+}
+
 void storage_log_idrow(uint32_t rxTs, uint32_t senderTs, int hops, const uint8_t hash8[8], const char* rawText) {
   if (!ready) return;
   bool fresh = !SD.exists("/tdos/idlog.csv");

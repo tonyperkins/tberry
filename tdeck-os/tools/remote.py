@@ -10,7 +10,8 @@ Each COMMAND is one quoted string:
   "keys hello"             type text
   "ball 1 0" / "click" / "long"   trackball step, click, long press (Home)
   "wait 500"               pause, milliseconds
-  "info"                   prints mode, free LVGL memory, free heap
+  "info"                   prints mode, free LVGL memory, free heap, why the last start happened
+  "crash" / "hang"         force a crash or a stuck loop, to test the crash record and watchdog
   "shot name.png"          screenshot to a PNG file
 
 Example:  remote.py "tap 40 100" "wait 500" "shot messages.png"
@@ -74,11 +75,8 @@ def main():
     if not args:
         print(__doc__)
         return 1
-    s = serial.Serial()
-    s.port, s.baudrate, s.timeout = port, 115200, 0.5
-    s.dtr = False
-    s.rts = False
-    s.open()
+    # Leave DTR/RTS at the defaults: toggling them makes the ESP32-S3's USB port reset the chip.
+    s = serial.Serial(port, 115200, timeout=0.5)
     s.reset_input_buffer()
     for cmd in args:
         if cmd.startswith("shot "):

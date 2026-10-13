@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include "ui.h"
+#include "diag.h"
 
 // Protocol (text lines in, "OK" out; a screenshot is a header line, raw RGB565 little endian, then DONE):
 //   tap X Y | swipe X1 Y1 X2 Y2 | key C | keys TEXT | ball DX DY | click | long | info | shot | wait MS
@@ -110,9 +111,11 @@ static void exec(char* s) {
   if (!strcmp(s, "long")) { ui_long(); busyUntil = millis() + 300; busy = true; return; }
   if (sscanf(s, "wait %d", &a) == 1) { busyUntil = millis() + a; busy = true; return; }
   if (!strcmp(s, "shot")) { startShot(); busy = true; return; }
+  if (!strcmp(s, "crash")) { volatile int* p = nullptr; *p = 1; return; }       // test the crash record
+  if (!strcmp(s, "hang")) { while (true) { delay(100); } }                       // test the watchdog (loop never returns)
   if (!strcmp(s, "info")) {
     char b2[96];
-    snprintf(b2, sizeof(b2), "INFO mode=%d lvfree=%u heap=%u", ui_mode(), (unsigned)ui_lvgl_free(), (unsigned)ESP.getFreeHeap());
+    snprintf(b2, sizeof(b2), "INFO mode=%d lvfree=%u heap=%u last=%s", ui_mode(), (unsigned)ui_lvgl_free(), (unsigned)ESP.getFreeHeap(), diag_reason());
     say(b2);
     return;
   }

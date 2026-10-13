@@ -18,6 +18,7 @@
 #include "fonts/fonts.h"
 #include "emoji.h"
 #include "remote.h"
+#include "diag.h"
 #include "audio.h"
 #include "reaction.h"
 #include "mention.h"
@@ -1563,6 +1564,7 @@ static void fillSettings() {
 #else
   addRow("About", "tdeck-os 0.1", ROW_ABOUT, K_INFO);
 #endif
+  addRow("Last start", diag_reason(), ROW_ABOUT, K_INFO);
   addRow("Advanced", "", ROW_ADV, K_NAV);
   if (listKind[listSel] == K_INFO) listSel = nextSelectable(listSel, 1);
   listHighlight();

@@ -27,6 +27,7 @@
 #include <target.h>
 #include "ui.h"
 #include "remote.h"
+#include "diag.h"
 #include "messages.h"
 #include "settings.h"
 #include "storage.h"
@@ -795,10 +796,12 @@ void setup() {
     }
   }
 
+  diag_begin();
   SPIFFS.begin(true);
   settings_begin(SPIFFS);
   msgs_init();
   storage_begin(TFT_eSPI::getSPIinstance(), PIN_SD_CS);   // message history; fine if no card
+  storage_log_boot(diag_line());
   audio_begin();
   audio_set_volume(cfg().volume);
   ui_init();
@@ -828,6 +831,7 @@ void setup() {
   } else {
     chatPush("radio init failed");
   }
+  diag_watchdog_start();
 }
 
 void loop() {
@@ -843,6 +847,7 @@ void loop() {
   pollKeyboard();
   pollTrackball();
   remote_poll();
+  diag_tick(loopMax);
 
   uint32_t now = millis();
   if (now - lastDraw >= 250) {
