@@ -13,6 +13,15 @@ struct UiModel {
   int unread = 0;            // unread messages across all conversations
   char nodeName[32] = {0};   // this node's name on the mesh
   char storage[32] = {0};    // where history is kept, for the Settings screen
+  // health, for the Status screen
+  int batteryMv = 0;
+  uint32_t uptimeSec = 0;
+  uint32_t packetsRx = 0, packetsTx = 0, rxErrors = 0;
+  uint32_t airtimeMs = 0;    // total time this radio has spent transmitting
+  uint32_t loopWorstMs = 0;  // worst main-loop pass in the last minute
+  uint32_t heapKb = 0, psramKb = 0;
+  uint8_t timeSource = 0;    // 0 none, 1 borrowed from the mesh, 2 GPS
+  bool sdReady = false;
   char consoleText[720] = {0};   // text shown by the debug console
 };
 

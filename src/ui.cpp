@@ -62,7 +62,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -79,6 +79,8 @@ static int listN = 0, listSel = 0;
 static lv_obj_t *pinMsg, *pinDots[4];
 static lv_obj_t *brightSlider, *brightLbl;
 static lv_obj_t *nodesBox;
+static lv_obj_t *stVal[6], *stSub[6], *stPill, *stPillLbl, *stNote;
+static UiModel stLast;                   // the latest model, for screens built after it arrived
 static lv_obj_t *sigTarget, *sigBtnLbl, *sigStatus, *sigVal[4];
 static int sigConv = -1;                 // conversation the range test goes to
 static uint32_t sigStartMs = 0, sigShownVersion = 0, nodesShownVersion = 0, nodesBuiltMs = 0, nowUtc = 0;
@@ -110,7 +112,7 @@ static const App apps[6] = {
   { "Signal", LV_SYMBOL_WIFI, 0xFFB547, "" },
   { "Nodes", LV_SYMBOL_LIST, 0x2FC4B2, "" },
   { "Map", LV_SYMBOL_GPS, 0x8B7CFF, "Your position and nearby nodes." },
-  { "Status", LV_SYMBOL_BATTERY_3, 0x43C77B, "Battery, uptime, health." },
+  { "Status", LV_SYMBOL_BATTERY_3, 0x43C77B, "" },
   { "Settings", LV_SYMBOL_SETTINGS, 0x66758A, "Name, brightness, advanced.\nBuilt next." },
 };
 
@@ -196,6 +198,7 @@ static uint32_t avatarColor(const char* name) {
 static void showHome();
 static void openApp(int i);
 static void openNodes();
+static void openStatus();
 static void openConvs();
 static void openThread(int conv);
 static void goBack();
@@ -208,7 +211,7 @@ static void setSel(int i) {
 static void releaseApp() {            // forget pointers into the app screen before it goes away
   dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr;
   listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
-  brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
+  brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; stPill = nullptr; stNote = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
   curConv = -1;
   msgs_set_open(-1);
 }
@@ -286,6 +289,7 @@ static void openApp(int i) {
   if (i == 5) { openSettings(); return; }
   if (i == 1) { openSignal(); return; }
   if (i == 2) { openNodes(); return; }
+  if (i == 4) { openStatus(); return; }
   mode = M_APP;
   lv_obj_t* s = newScreen();
   headerFor(s, apps[i].name);
@@ -1125,7 +1129,7 @@ static void fillNodes() {
   lv_obj_clean(nodesBox);
   int n = nodes_count();
   if (n == 0) {
-    lv_obj_t* t = label(nodesBox, "Nobody heard yet.\\nNodes appear as they advertise.", &font_tdos_14, MUTE);
+    lv_obj_t* t = label(nodesBox, "Nobody heard yet.\nNodes appear as they advertise.", &font_tdos_14, MUTE);
     lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(t, LV_ALIGN_CENTER, 0, 10);
     return;
@@ -1155,8 +1159,8 @@ static void fillNodes() {
 
     char sig[24], age[12];
     formatAge(ni->lastTs, age, sizeof(age));
-    if (ni->rssi) snprintf(sig, sizeof(sig), "%d dBm\\n%s", ni->rssi, age);
-    else snprintf(sig, sizeof(sig), "\\n%s", age);
+    if (ni->rssi) snprintf(sig, sizeof(sig), "%d dBm\n%s", ni->rssi, age);
+    else snprintf(sig, sizeof(sig), "\n%s", age);
     lv_obj_t* rt = label(row, sig, &font_tdos_12, ni->rssi > -100 || !ni->rssi ? TEXT : ACCENT);
     lv_obj_set_style_text_align(rt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(rt, LV_ALIGN_RIGHT_MID, -10, 0);
@@ -1294,7 +1298,7 @@ static void openSignal() {
   lv_obj_center(sigBtnLbl);
   lv_obj_add_event_cb(btn, sigSendCb, LV_EVENT_CLICKED, nullptr);
 
-  const char* caps[4] = { "ROUND TRIP", "HOPS", "RSSI dBm", "SNR dB" };
+  const char* caps[4] = { "REPLY", "HOPS", "RSSI dBm", "SNR dB" };
   for (int i = 0; i < 4; i++) {
     lv_obj_t* t = box(s, 74, 52, RAISE, 12);
     lv_obj_set_pos(t, 4 + i * 79, 154);
@@ -1307,6 +1311,88 @@ static void openSignal() {
   lv_obj_set_pos(sigStatus, 8, 214);
   sigShownVersion = sig_version();
   refreshSignal();
+  loadApp(s);
+}
+
+// ── Status: is everything healthy ────────────────────────────────
+static void fmtDuration(uint32_t s, char* out, size_t n) {
+  if (s < 60) snprintf(out, n, "%us", (unsigned)s);
+  else if (s < 3600) snprintf(out, n, "%um %us", (unsigned)(s / 60), (unsigned)(s % 60));
+  else if (s < 86400) snprintf(out, n, "%uh %um", (unsigned)(s / 3600), (unsigned)((s % 3600) / 60));
+  else snprintf(out, n, "%ud %uh", (unsigned)(s / 86400), (unsigned)((s % 86400) / 3600));
+}
+
+static void refreshStatus() {
+  if (!stPill) return;
+  const UiModel& m = stLast;
+  char b[48], c[48];
+
+  snprintf(b, sizeof(b), "%d%%", m.batteryPct);
+  snprintf(c, sizeof(c), "%.2f V%s", m.batteryMv / 1000.0f, m.charging ? ", charging" : "");
+  lv_label_set_text(stVal[0], b); lv_label_set_text(stSub[0], c);
+
+  fmtDuration(m.uptimeSec, b, sizeof(b));
+  lv_label_set_text(stVal[1], b); lv_label_set_text(stSub[1], "since power on");
+
+  int repeaters = 0, n = nodes_count();
+  for (int i = 0; i < n; i++) { const NodeInfo* ni = nodes_sorted(i); if (ni && ni->type == 2) repeaters++; }
+  snprintf(b, sizeof(b), "%d nodes", n);
+  snprintf(c, sizeof(c), "%d repeaters", repeaters);
+  lv_label_set_text(stVal[2], b); lv_label_set_text(stSub[2], c);
+
+  snprintf(b, sizeof(b), "%lu / %lu", (unsigned long)m.packetsRx, (unsigned long)m.packetsTx);
+  uint32_t pct10 = m.uptimeSec ? (uint32_t)((uint64_t)m.airtimeMs * 1000ULL / ((uint64_t)m.uptimeSec * 1000ULL)) : 0;   // tenths of a percent
+  snprintf(c, sizeof(c), "in / out, %lu.%lu%% airtime", (unsigned long)(pct10 / 10), (unsigned long)(pct10 % 10));
+  lv_label_set_text(stVal[3], b); lv_label_set_text(stSub[3], c);
+
+  const Settings& cs = cfg();
+  snprintf(b, sizeof(b), "%.3f MHz", cs.freq);
+  snprintf(c, sizeof(c), "SF%d  BW %.4g  4/%d", cs.sf, cs.bw, cs.cr);
+  lv_label_set_text(stVal[4], b); lv_label_set_text(stSub[4], c);
+
+  lv_label_set_text(stVal[5], m.sdReady ? "SD card" : "No SD card");
+  lv_label_set_text(stSub[5], lastStorage[0] ? lastStorage : "");
+
+  // Healthy means: no long stalls, memory not running out, and the radio is working.
+  bool stalls = m.loopWorstMs > 400;
+  bool lowMem = m.heapKb < 40;
+  bool errs = m.packetsRx > 20 && m.rxErrors * 4 > m.packetsRx;
+  bool ok = !stalls && !lowMem && !errs;
+  lv_label_set_text(stPillLbl, ok ? "Healthy" : "Check");
+  lv_obj_set_style_bg_color(stPill, C(ok ? GOOD : ACCENT), 0);
+  const char* ts = m.timeSource == 2 ? "GPS time" : m.timeSource == 1 ? "mesh time" : "no clock";
+  snprintf(b, sizeof(b), "worst loop %lu ms, %lu KB free, %s", (unsigned long)m.loopWorstMs, (unsigned long)m.heapKb, ts);
+  lv_label_set_text(stNote, b);
+}
+
+static void openStatus() {
+  mode = M_STATUS;
+  lv_obj_t* s = newScreen();
+  headerFor(s, "Status");
+  const char* titles[6] = { "BATTERY", "UPTIME", "HEARD", "PACKETS", "RADIO", "STORAGE" };
+  for (int i = 0; i < 6; i++) {
+    lv_obj_t* t = box(s, 154, 46, RAISE, 12);
+    lv_obj_set_pos(t, 4 + (i % 2) * 158, 60 + (i / 2) * 50);
+    lv_obj_t* cap = label(t, titles[i], &font_tdos_12, MUTE);
+    lv_obj_set_pos(cap, 10, 3);
+    stVal[i] = label(t, "-", &font_tdos_14, TEXT);
+    lv_obj_set_pos(stVal[i], 10, 17);
+    lv_obj_set_width(stVal[i], 136);
+    lv_label_set_long_mode(stVal[i], LV_LABEL_LONG_CLIP);
+    stSub[i] = label(t, "", &font_tdos_12, MUTE);
+    lv_obj_set_pos(stSub[i], 10, 31);
+    lv_obj_set_width(stSub[i], 136);
+    lv_label_set_long_mode(stSub[i], LV_LABEL_LONG_CLIP);
+  }
+  stPill = box(s, 76, 22, GOOD, 11);
+  lv_obj_set_pos(stPill, 6, 214);
+  stPillLbl = label(stPill, "Healthy", &font_tdos_12, INK);
+  lv_obj_center(stPillLbl);
+  stNote = label(s, "", &font_tdos_12, MUTE);
+  lv_obj_set_pos(stNote, 90, 217);
+  lv_obj_set_width(stNote, 226);
+  lv_label_set_long_mode(stNote, LV_LABEL_LONG_CLIP);
+  refreshStatus();
   loadApp(s);
 }
 
@@ -1481,6 +1567,11 @@ void ui_update(const UiModel& m) {
   }
 
   nowUtc = m.clockValid ? m.utc : 0;
+  stLast.batteryPct = m.batteryPct; stLast.charging = m.charging; stLast.batteryMv = m.batteryMv;
+  stLast.uptimeSec = m.uptimeSec; stLast.packetsRx = m.packetsRx; stLast.packetsTx = m.packetsTx;
+  stLast.rxErrors = m.rxErrors; stLast.airtimeMs = m.airtimeMs; stLast.loopWorstMs = m.loopWorstMs;
+  stLast.heapKb = m.heapKb; stLast.psramKb = m.psramKb; stLast.timeSource = m.timeSource; stLast.sdReady = m.sdReady;
+  if (mode == M_STATUS) refreshStatus();
   if (mode == M_SIGNAL && sigStatus && (sig_version() != sigShownVersion || sig_pending())) {
     sigShownVersion = sig_version();
     refreshSignal();
@@ -1582,7 +1673,7 @@ void ui_key(char c) {
     if (c == 8 || c == 127) { if (pinLen == 0) goBack(); else ui_pin_key(9); return; }
     return;
   }
-  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES) && (c == 8 || c == 127)) { goBack(); return; }
+  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS) && (c == 8 || c == 127)) { goBack(); return; }
 }
 
 bool ui_console_active() { return mode == M_DBG; }

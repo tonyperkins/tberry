@@ -351,7 +351,9 @@ static SimpleMeshTables tables;
 static DeckMesh* theMesh = nullptr;
 
 static bool radioOk = false, kbOk = false;
-static uint32_t loopMax = 0;
+static uint32_t loopMax = 0;          // worst pass since boot
+static uint32_t loopRecent = 0;       // worst pass in the current minute
+static uint32_t loopRecentShown = 0;  // the previous minute's value, which is what the UI reports
 
 // ── GPS: only the time is used, from RMC sentences ──────────────
 static bool gpsFix = false;
@@ -451,6 +453,17 @@ static void buildModel(UiModel& m) {
   m.signalBars = age < 120 ? 4 : age < 600 ? 3 : age < 3600 ? 2 : age < 10800 ? 1 : 0;
   m.nodesHeard = theMesh ? theMesh->getNumContacts() : 0;
   m.unread = msgs_unread_total();
+  m.batteryMv = mv;
+  m.uptimeSec = millis() / 1000;
+  m.packetsRx = radio_driver.getPacketsRecv();
+  m.packetsTx = radio_driver.getPacketsSent();
+  m.rxErrors = radio_driver.getPacketsRecvErrors();
+  m.airtimeMs = theMesh ? theMesh->getTotalAirTime() : 0;
+  m.loopWorstMs = max(loopRecentShown, loopRecent);
+  m.heapKb = ESP.getFreeHeap() / 1024;
+  m.psramKb = ESP.getFreePsram() / 1024;
+  m.timeSource = gpsFix ? 2 : (m.clockValid ? 1 : 0);
+  m.sdReady = storage_ready();
   if (storage_ready()) snprintf(m.storage, sizeof(m.storage), "SD, %lu MB free", (unsigned long)storage_free_mb());
   else snprintf(m.storage, sizeof(m.storage), "No SD card");
   if (theMesh) strncpy(m.nodeName, theMesh->name, sizeof(m.nodeName) - 1);
@@ -574,5 +587,12 @@ void loop() {
   }
   uint32_t dt = millis() - t0;
   if (dt > loopMax) loopMax = dt;
+  if (dt > loopRecent) loopRecent = dt;
+  static uint32_t minuteStart = 0;
+  if (millis() - minuteStart > 60000) {
+    minuteStart = millis();
+    loopRecentShown = loopRecent;
+    loopRecent = 0;
+  }
   delay(1);
 }
