@@ -11,7 +11,8 @@ One file per ticket. Status values: `open`, `in progress`, `done`. Edit the file
 | [TDOS-005](TDOS-005-gps-data-validity.md) | GPS tiles show impossible values without a real fix | bug | done |
 | [TDOS-006](TDOS-006-highlight-mentions-of-me.md) | Highlight and chime for messages that mention me | feature | done |
 | [TDOS-007](TDOS-007-quote-parent-message.md) | Show the message being replied to above a reply | feature | open |
-| [TDOS-008](TDOS-008-reactions.md) | Recognise reactions | feature, research | open |
+| [TDOS-008](TDOS-008-reactions.md) | Recognise reactions | feature, research | phase 0 done |
+| [TDOS-009](TDOS-009-gps-power-toggle.md) | GPS on/off switch in Settings and the quick panel | feature | open |
 
 Background for all of them: the radio hands every message callback the whole `mesh::Packet`, so hop
 count, route type, path, SNR and payload size are available at the moment a message arrives. The

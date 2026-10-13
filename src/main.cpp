@@ -30,6 +30,7 @@
 #include "settings.h"
 #include "storage.h"
 #include "audio.h"
+#include "reaction.h"
 #include "nodes.h"
 #include "rangetest.h"
 
@@ -245,12 +246,14 @@ protected:
       info.sender[sep - text] = 0;
       body = sep + 2;
     }
-    bool mention = mentionsMe(text);
+    char ra[40], re[24], rc[12];
+    bool reaction = parseReaction(body, ra, sizeof(ra), re, sizeof(re), rc, sizeof(rc));
+    bool mention = !reaction && mentionsMe(text);      // a reaction to us is shown, but does not chime
     if (mention) info.flags |= MF_MENTION;
     msgs_add_info(_pubConv, false, body, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
     // The channel is silent unless the owner asked for more (TDOS-006).
     uint8_t policy = cfg().channelSound;
-    if (policy == 2 || (policy == 1 && mention)) audio_play(SND_RECEIVE);
+    if (!reaction && (policy == 2 || (policy == 1 && mention))) audio_play(SND_RECEIVE);
     chatPush("# %s", text);
     logf("channel msg (hops %d)%s: %s\n", (int)pkt->getPathHashCount(), mention ? " MENTION" : "", text);
   }

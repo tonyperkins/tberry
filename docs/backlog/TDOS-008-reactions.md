@@ -1,6 +1,6 @@
 # TDOS-008: Recognise reactions
 
-**Type:** feature  **Status:** open  **Area:** Messages (thread view), research  **Depends on:** TDOS-007 helpful
+**Type:** feature  **Status:** phase 0 done  **Area:** Messages (thread view), research  **Depends on:** TDOS-007 helpful
 
 ## Why
 Reactions travel as ordinary channel text, so a client that does not understand them shows lines
@@ -48,6 +48,14 @@ Candidates, cheapest to test first:
 Test: have the device log, for every received channel message, the base-36 forms of candidate 1 and
 candidates 2 and 3 to the SD card, beside the text and sender. When a reaction line arrives from the
 channel, look which candidate equals its code. A few reactions are enough to decide.
+
+## Phase 0 as built
+- `src/reaction.h` holds `parseReaction()`, a strict recogniser. It is applied when the thread is
+  drawn, so reactions already in the history are tidied too.
+- A reaction renders as one quiet line, `Sender reacted 🎉 to Author` (accent colour when it is to
+  this node), with the code hidden. The conversation preview reads `Sender reacted 🎉`.
+- A reaction does not chime and is not treated as a mention.
+- `tests/reaction_test.cpp` covers the sample lines and the near-misses that must not match.
 
 ## Acceptance criteria (phase 0)
 - Reaction lines never show as raw `@[Name]😂 xxxxxxxx` text.

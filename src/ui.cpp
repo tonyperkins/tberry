@@ -18,6 +18,7 @@
 #include "fonts/fonts.h"
 #include "emoji.h"
 #include "audio.h"
+#include "reaction.h"
 
 extern TFT_eSPI tft;
 
@@ -361,7 +362,10 @@ static void fillConvs() {
     char pv[200] = "No messages yet";
     if (last) {
       char tmp[230];
-      if (c->channel && last->sender[0] && !last->out) snprintf(tmp, sizeof(tmp), "%s: %s", last->sender, last->text);
+      char ra[40], re[24], rc[12];
+      if (c->channel && !last->out && parseReaction(last->text, ra, sizeof(ra), re, sizeof(re), rc, sizeof(rc)))
+        snprintf(tmp, sizeof(tmp), "%s reacted %s", last->sender[0] ? last->sender : "Someone", re);
+      else if (c->channel && last->sender[0] && !last->out) snprintf(tmp, sizeof(tmp), "%s: %s", last->sender, last->text);
       else snprintf(tmp, sizeof(tmp), "%s", last->text);
       emoji_filter(tmp, pv, sizeof(pv), true);
     }
@@ -459,6 +463,20 @@ static void buildThread() {
   if (!c) return;
   for (int i = 0; i < c->count; i++) {
     const Msg* m = msgs_at(curConv, i);
+
+    // A reaction (@[Author]<emoji> <code>) is not a bubble: one quiet line, without the code.
+    char rAuthor[40], rEmoji[24], rCode[12];
+    if (c->channel && !m->out && parseReaction(m->text, rAuthor, sizeof(rAuthor), rEmoji, sizeof(rEmoji), rCode, sizeof(rCode))) {
+      char raw[160], shown[160];
+      const char* who = m->sender[0] ? m->sender : "Someone";
+      bool toMe = lastName[0] && strcmp(rAuthor, lastName) == 0;
+      snprintf(raw, sizeof(raw), "%s reacted %s to %s", who, rEmoji, toMe ? "you" : rAuthor);
+      emoji_filter(raw, shown, sizeof(shown), true);   // the emoji if the pack has it, else just the words
+      lv_obj_t* rl = label(thrBox, shown, emoji_font(&font_tdos_12), toMe ? ACCENT : MUTE);
+      lv_obj_set_width(rl, lv_pct(100));
+      lv_label_set_long_mode(rl, LV_LABEL_LONG_WRAP);
+      continue;
+    }
 
     // one row per message: the bubble, then a small line with the time and delivery state
     lv_obj_t* row = lv_obj_create(thrBox);
