@@ -1,16 +1,14 @@
-// tdeck-os, step 1: MeshCore chat node on the T-Deck Plus hardware layer.
+// tdeck-os: standalone MeshCore messenger firmware for the LilyGO T-Deck Plus.
 //
-// What this proves: the radio speaks MeshCore (adverts, contacts, encrypted DMs, Public channel),
-// keeps its identity and contacts across reboots, and nothing in the main loop can block.
-// The screen is a plain text console for now; the real UI comes in step 2.
-//
-// Controls: type with the keyboard, Enter sends to the selected recipient,
-// trackball up/down selects the recipient (Public channel, then known contacts).
+// This file wires three things together: the hardware (display, touch, keyboard, trackball,
+// GPS time, radio), the MeshCore node (DeckMesh below), and the UI (ui.cpp) through a small
+// message store (messages.cpp).
 //
 // Rules carried over from earlier firmware trouble:
-//   * the trackball is interrupt-driven, never polled
+//   * the trackball is interrupt-driven; the loop only reads timestamps and counters
 //   * serial logging goes through logf(), which can never block on an unread USB port
 //   * radio work is non-blocking (MeshCore's loop handles it)
+//   * file writes are batched so the loop never stalls on flash
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -27,6 +25,8 @@
 #include <helpers/BaseChatMesh.h>
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
 #include <target.h>
+#include "ui.h"
+#include "messages.h"
 
 #define PUBLIC_GROUP_PSK "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -51,16 +51,21 @@ static void logf(const char* fmt, ...) {
   if ((int)Serial.availableForWrite() >= n) Serial.write((const uint8_t*)b, n);
 }
 
-// ── Trackball (interrupts count edges; the loop consumes the counters) ──
-static volatile uint32_t isrUp, isrDown, isrLeft, isrRight, isrClick;
+// ── Trackball: interrupts count edges; the click is timestamped on press and release ──
+static volatile uint32_t isrUp, isrDown, isrLeft, isrRight;
+static volatile bool clkDown = false, clkReleased = false;
+static volatile uint32_t clkDownAt = 0;
 static void IRAM_ATTR onUp()    { isrUp++; }
 static void IRAM_ATTR onDown()  { isrDown++; }
 static void IRAM_ATTR onLeft()  { isrLeft++; }
 static void IRAM_ATTR onRight() { isrRight++; }
 static void IRAM_ATTR onClick() {
   static uint32_t last;
-  uint32_t now = micros();
-  if (digitalRead(PIN_TB_CLICK) == LOW && now - last > 20000) { isrClick++; last = now; }
+  uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+  if (now - last < 15) return;     // contact bounce
+  last = now;
+  if (digitalRead(PIN_TB_CLICK) == LOW) { clkDown = true; clkDownAt = now; }
+  else if (clkDown) { clkDown = false; clkReleased = true; }
 }
 
 // ── Board ────────────────────────────────────────────────────────
@@ -89,8 +94,10 @@ static void chatPush(const char* fmt, ...) {
 // ── The mesh node ────────────────────────────────────────────────
 class DeckMesh : public BaseChatMesh {
   fs::FS* _fs = nullptr;
-  uint32_t _expectedAck = 0;
-  uint32_t _sentAtMs = 0;
+  struct Pending { uint32_t ack; int conv; uint32_t msgId; uint32_t sentMs; };
+  static constexpr int MAX_PENDING = 6;
+  Pending _pending[MAX_PENDING] = {};
+  int _pubConv = -1;
   ChannelDetails* _public = nullptr;
   bool _dirty = false;
   uint32_t _lastSaveMs = 0;
@@ -158,6 +165,8 @@ protected:
       chatPush("clock set from mesh");
     }
     chatPush("%s %s (%d hops)", is_new ? "New:" : "Heard:", contact.name, (int)path_len);
+    lastHeardMs = millis();
+    if (contact.type == ADV_TYPE_CHAT) msgs_ensure(contact.id.pub_key, contact.name, false);
     logf("advert %s type=%d new=%d hops=%d\n", contact.name, (int)contact.type, (int)is_new, (int)path_len);
     _dirty = true;
   }
@@ -166,19 +175,28 @@ protected:
     _dirty = true;
   }
   ContactInfo* processAck(const uint8_t* data) override {
-    if (_expectedAck && memcmp(data, &_expectedAck, 4) == 0) {
-      chatPush("  delivered (%lu ms)", (unsigned long)(millis() - _sentAtMs));
-      _expectedAck = 0;
+    for (auto& p : _pending) {
+      if (p.ack && memcmp(data, &p.ack, 4) == 0) {
+        msgs_set_status(p.conv, p.msgId, MS_DELIVERED);
+        chatPush("  delivered (%lu ms)", (unsigned long)(millis() - p.sentMs));
+        p.ack = 0;                       // the same ACK can arrive more than once
+        break;
+      }
     }
     return NULL;
   }
   void onMessageRecv(const ContactInfo& from, mesh::Packet* pkt, uint32_t ts, const char* text) override {
+    lastHeardMs = millis();
+    int conv = msgs_ensure(from.id.pub_key, from.name, false);
+    msgs_add(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED);
     chatPush("%s: %s", from.name, text);
     logf("DM from %s (%s): %s\n", from.name, pkt->isRouteDirect() ? "direct" : "flood", text);
   }
   void onCommandDataRecv(const ContactInfo&, mesh::Packet*, uint32_t, const char*) override {}
   void onSignedMessageRecv(const ContactInfo&, mesh::Packet*, uint32_t, const uint8_t*, const char*) override {}
   void onChannelMessageRecv(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t, const char* text) override {
+    lastHeardMs = millis();
+    msgs_add(_pubConv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED);
     chatPush("# %s", text);
     logf("channel msg (hops %d): %s\n", (int)pkt->path_len, text);
   }
@@ -188,10 +206,20 @@ protected:
   uint32_t calcDirectTimeoutMillisFor(uint32_t airtime, uint8_t path_len) const override {
     return 500 + (airtime * 6.0f + 250) * ((path_len & 63) + 1);
   }
-  void onSendTimeout() override { chatPush("  no ack (timed out)"); }
+  void onSendTimeout() override {
+    // MeshCore reports one timeout for the most recent send: fail the oldest message still waiting.
+    Pending* oldest = nullptr;
+    for (auto& p : _pending) if (p.ack && (!oldest || p.sentMs < oldest->sentMs)) oldest = &p;
+    if (oldest) {
+      msgs_set_status(oldest->conv, oldest->msgId, MS_FAILED);
+      oldest->ack = 0;
+    }
+    chatPush("  no ack (timed out)");
+  }
 
 public:
   char name[32] = "TDeck";
+  uint32_t lastHeardMs = 0;        // last time any contact or message was heard
 
   DeckMesh(mesh::Radio& radio, mesh::RNG& rng, mesh::RTCClock& rtc, SimpleMeshTables& tables)
       : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables) {}
@@ -212,6 +240,12 @@ public:
     snprintf(name, sizeof(name), "TDeck-%02X%02X", self_id.pub_key[0], self_id.pub_key[1]);
     loadContacts();
     _public = addChannel("Public", PUBLIC_GROUP_PSK);
+
+    // Conversations: the Public channel, then every person we already know.
+    _pubConv = msgs_ensure(CHANNEL_KEY, "Public", true);
+    ContactsIterator iter = startContactsIterator();
+    ContactInfo c;
+    while (iter.hasNext(this, c)) if (c.type == ADV_TYPE_CHAT) msgs_ensure(c.id.pub_key, c.name, false);
   }
 
   // Writing the contact file takes ~0.5 s of flash time, so batch it instead of saving per advert.
@@ -223,64 +257,39 @@ public:
     }
   }
 
-  int chatContacts() { return recipientCount() - 1; }
-
   void advertise(int delayMs) {
     auto pkt = createSelfAdvert(name, 0.0, 0.0);
     if (pkt) sendFlood(pkt, delayMs);
   }
 
-  // The n-th (from 0) contact that is a person. Uses the iterator because the raw array starts
-  // with reserved anonymous slots that getContactByIdx() would expose.
-  bool chatAt(int n, ContactInfo& out) {
-    ContactsIterator iter = startContactsIterator();
-    ContactInfo c;
-    int k = 0;
-    while (iter.hasNext(this, c)) {
-      if (c.type != ADV_TYPE_CHAT) continue;
-      if (k == n) { out = c; return true; }
-      k++;
-    }
-    return false;
-  }
-
-  // recipient index 0 = Public channel, 1.. = people
-  int recipientCount() {
-    ContactInfo c;
-    int n = 1;
-    while (chatAt(n - 1, c)) n++;
-    return n;
-  }
-  bool recipientName(int idx, char* out, size_t len) {
-    if (idx == 0) { snprintf(out, len, "Public channel"); return true; }
-    ContactInfo c;
-    if (!chatAt(idx - 1, c)) return false;
-    snprintf(out, len, "%s", c.name);
-    return true;
-  }
-
-  bool sendTo(int idx, const char* text) {
+  // Sends `text` into a conversation and tracks its delivery. The outgoing message is stored
+  // first so the UI shows it immediately with "sending...".
+  bool sendConv(int conv, const char* text) {
+    const Conv* c = msgs_conv(conv);
+    if (!c || !*text) return false;
     uint32_t now = getRTCClock()->getCurrentTime();
-    if (idx == 0) {
+    uint32_t id = msgs_add(conv, true, text, now, MS_SENDING);
+
+    if (c->channel) {
       bool ok = sendGroupMessage(now, _public->channel, name, text, strlen(text));
-      chatPush("%s# %s", ok ? "" : "FAILED ", text);
+      msgs_set_status(conv, id, ok ? MS_SENT : MS_FAILED);   // channels have no per-message ACK
       return ok;
     }
-    ContactInfo c;
-    if (!chatAt(idx - 1, c)) return false;
-    ContactInfo* ci = lookupContactByPubKey(c.id.pub_key, PUB_KEY_SIZE);
-    if (!ci) return false;
-    uint32_t est;
-    int r = sendMessage(*ci, now, 0, text, _expectedAck, est);
-    if (r == MSG_SEND_FAILED) { chatPush("send failed"); return false; }
-    _sentAtMs = millis();
-    chatPush("> %s: %s", c.name, text);
-    return true;
+    ContactInfo* ci = lookupContactByPubKey(c->key, 4);
+    if (!ci) { msgs_set_status(conv, id, MS_FAILED); return false; }
+    uint32_t ack = 0, est = 0;
+    int r = sendMessage(*ci, now, 0, text, ack, est);
+    if (r == MSG_SEND_FAILED) { msgs_set_status(conv, id, MS_FAILED); return false; }
+    msgs_set_status(conv, id, MS_SENT);
+    for (auto& p : _pending) {
+      if (!p.ack) { p = { ack, conv, id, millis() }; return true; }
+    }
+    return true;                          // table full: delivered status just won't be tracked
   }
 };
 
 // ── Globals ──────────────────────────────────────────────────────
-static TFT_eSPI tft;
+TFT_eSPI tft;                 // also used by ui.cpp
 DeckBoard board;
 // The radio shares the display's SPI object: the global SPI would re-attach the chip's default pins.
 CustomSX1262 radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, TFT_eSPI::getSPIinstance());
@@ -292,10 +301,6 @@ static SimpleMeshTables tables;
 static DeckMesh* theMesh = nullptr;
 
 static bool radioOk = false, kbOk = false;
-static int recipient = 0;
-static char typed[96];
-static int typedLen = 0;
-static uint32_t seenUp, seenDown, seenClick;
 static uint32_t loopMax = 0;
 
 // ── GPS: only the time is used, from RMC sentences ──────────────
@@ -341,49 +346,75 @@ static void pollKeyboard() {
   if (Wire.requestFrom(KB_ADDR, (uint8_t)1) != 1) return;
   char c = Wire.read();
   if (!c) return;
-  if (c == '\r' || c == '\n') {
-    if (typedLen > 0 && theMesh) {
-      typed[typedLen] = 0;
-      theMesh->sendTo(recipient, typed);
-      typedLen = 0;
+  ui_activity();
+  ui_key(c);
+}
+
+// A stroke of the ball gives only ~2 edges, with some cross-talk on the other axis. Collect edges
+// for a short window, then take one step in whichever direction had the most.
+static void pollTrackball() {
+  static uint32_t pu, pd, pl, pr, accU, accD, accL, accR, windowStart;
+  static bool longFired = false;
+  uint32_t u = isrUp, d = isrDown, l = isrLeft, r = isrRight;
+  uint32_t any = (u - pu) + (d - pd) + (l - pl) + (r - pr);
+  accU += u - pu; accD += d - pd; accL += l - pl; accR += r - pr;
+  pu = u; pd = d; pl = l; pr = r;
+
+  uint32_t now = millis();
+  if (any && windowStart == 0) windowStart = now;
+  if (windowStart && now - windowStart >= 50) {
+    int dx = 0, dy = 0;
+    uint32_t horiz = max(accL, accR), vert = max(accU, accD);
+    if (horiz >= vert) dx = (accR >= accL) ? 1 : -1;      // ties go to sideways: the grid is wider than tall
+    else dy = (accD >= accU) ? 1 : -1;
+    accU = accD = accL = accR = 0;
+    windowStart = 0;
+    ui_activity();
+    ui_nav(dx, dy);
+  }
+
+  if (clkReleased) {
+    clkReleased = false;
+    if (!longFired) {
+      ui_activity();
+      if (ui_console_active()) { if (theMesh) theMesh->advertise(0); chatPush("(advert sent)"); }
+      else ui_click();
     }
-  } else if (c == 8 || c == 127) {
-    if (typedLen > 0) typedLen--;
-  } else if (c >= 32 && c < 127 && typedLen < (int)sizeof(typed) - 1) {
-    typed[typedLen++] = c;
+    longFired = false;
+  }
+  if (clkDown && !longFired && now - clkDownAt > 700) {
+    longFired = true;
+    ui_long();
   }
 }
 
-static void pollTrackball() {
-  uint32_t u = isrUp, d = isrDown, k = isrClick;
-  int n = theMesh ? theMesh->recipientCount() : 1;
-  if (d != seenDown) { seenDown = d; recipient = (recipient + 1) % n; }
-  if (u != seenUp)   { seenUp = u;   recipient = (recipient + n - 1) % n; }
-  if (k != seenClick) { seenClick = k; if (theMesh) theMesh->advertise(0); chatPush("(advert sent)"); }
-}
+static void buildModel(UiModel& m) {
+  m.utc = rtc.getCurrentTime();
+  m.clockValid = m.utc > 1700000000UL;
 
-static void drawScreen() {
-  static int row;
-  row = 0;
-  auto line = [&](uint16_t color, const char* fmt, ...) {
-    char b[80];
-    va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
-    tft.setTextColor(color, TFT_BLACK);
-    tft.setTextPadding(320);
-    tft.drawString(b, 4, 2 + row * 17, 2);
-    row++;
+  uint16_t mv = board.getBattMilliVolts();
+  int pct = ((int)mv - 3300) * 100 / (4150 - 3300);
+  m.batteryPct = constrain(pct, 0, 100);
+  m.charging = mv >= 4190;                       // heuristic: a full cell on USB reads ~4.2 V
+
+  uint32_t age = theMesh && theMesh->lastHeardMs ? (millis() - theMesh->lastHeardMs) / 1000 : 0xFFFFFFFF;
+  m.signalBars = age < 120 ? 4 : age < 600 ? 3 : age < 3600 ? 2 : age < 10800 ? 1 : 0;
+  m.nodesHeard = theMesh ? theMesh->getNumContacts() : 0;
+  m.unread = msgs_unread_total();
+
+  char* o = m.consoleText;
+  size_t left = sizeof(m.consoleText);
+  auto add = [&](const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(o, left, fmt, ap);
+    va_end(ap);
+    if (n > 0 && (size_t)n < left) { o += n; left -= n; }
   };
-  char who[40] = "?";
-  if (theMesh) theMesh->recipientName(recipient, who, sizeof(who));
-  line(TFT_CYAN, "%s  up %lus  loop %lums", theMesh ? theMesh->name : "-", (unsigned long)(millis() / 1000), (unsigned long)loopMax);
-  uint32_t tnow = rtc.getCurrentTime();
-  line(radioOk ? TFT_GREEN : TFT_RED, "Radio %s  contacts %d  %02u:%02u:%02u UTC %s", radioOk ? "OK" : "FAIL",
-       theMesh ? theMesh->getNumContacts() : 0, (unsigned)((tnow / 3600) % 24), (unsigned)((tnow / 60) % 60),
-       (unsigned)(tnow % 60), gpsFix ? "GPS" : (tnow > 1700000000UL ? "net" : "no time"));
-  line(TFT_YELLOW, "To: %s  (%d/%d)", who, recipient + 1, theMesh ? theMesh->recipientCount() : 1);
-  line(TFT_WHITE, "> %s_", typed);
-  line(TFT_DARKGREY, "ball U%lu D%lu  click=%lu (sends advert)", (unsigned long)isrUp, (unsigned long)isrDown, (unsigned long)isrClick);
-  for (int i = 0; i < CHAT_LINES; i++) line(TFT_WHITE, "%s", chatBuf[i]);
+  add("%s  up %lus  loop %lums  %s\n", theMesh ? theMesh->name : "-", (unsigned long)(millis() / 1000), (unsigned long)loopMax,
+      gpsFix ? "GPS" : (m.clockValid ? "net time" : "no time"));
+  add("Radio %s  contacts %d  batt %umV\n", radioOk ? "OK" : "FAIL", m.nodesHeard, (unsigned)mv);
+  for (int i = 0; i < CHAT_LINES; i++) add("%s\n", chatBuf[i]);
+  add("click=advert, hold=home");
 }
 
 void setup() {
@@ -407,12 +438,16 @@ void setup() {
   void (*isrs[4])() = {onUp, onDown, onLeft, onRight};
   for (int i = 0; i < 4; i++) { pinMode(dirs[i], INPUT_PULLUP); attachInterrupt(dirs[i], isrs[i], FALLING); }
   pinMode(PIN_TB_CLICK, INPUT_PULLUP);
-  attachInterrupt(PIN_TB_CLICK, onClick, FALLING);
+  attachInterrupt(PIN_TB_CLICK, onClick, CHANGE);
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.setClock(400000);
   Wire.beginTransmission(KB_ADDR);
   kbOk = (Wire.endTransmission(true) == 0);
+
+  msgs_init();
+  ui_init();
+  ui_set_send_handler([](int conv, const char* text) { return theMesh && theMesh->sendConv(conv, text); });
 
   board.begin();
   rtc.begin();
@@ -436,7 +471,6 @@ void setup() {
   } else {
     chatPush("radio init failed");
   }
-  tft.fillScreen(TFT_BLACK);
 }
 
 void loop() {
@@ -450,11 +484,18 @@ void loop() {
   pollTrackball();
 
   uint32_t now = millis();
-  if (now - lastDraw >= 250) { lastDraw = now; drawScreen(); }
+  if (now - lastDraw >= 250) {
+    lastDraw = now;
+    static UiModel model;
+    buildModel(model);
+    ui_update(model);
+  }
+  ui_tick();
   if (now - lastLog >= 5000) {
     lastLog = now;
-    logf("up=%lus contacts=%d loopmax=%lums heap=%u\n", (unsigned long)(now / 1000),
-         theMesh ? theMesh->getNumContacts() : 0, (unsigned long)loopMax, (unsigned)ESP.getFreeHeap());
+    logf("up=%lus contacts=%d loopmax=%lums heap=%u ball U%lu D%lu L%lu R%lu\n", (unsigned long)(now / 1000),
+         theMesh ? theMesh->getNumContacts() : 0, (unsigned long)loopMax, (unsigned)ESP.getFreeHeap(),
+         (unsigned long)isrUp, (unsigned long)isrDown, (unsigned long)isrLeft, (unsigned long)isrRight);
   }
   uint32_t dt = millis() - t0;
   if (dt > loopMax) loopMax = dt;
