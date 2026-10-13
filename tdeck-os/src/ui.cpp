@@ -70,7 +70,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL, M_SETUP };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -216,6 +216,7 @@ static uint32_t avatarColor(const char* name) {
 static void toast(const char* text);
 static void showHome();
 static void openApp(int i);
+static void openSetup(int step);
 static void openMap();
 static void openMapFocus(double lat, double lon, const char* name);
 static void openMessageDetails(int conv, int idx);
@@ -241,6 +242,7 @@ static void releaseApp() {            // forget pointers into the app screen bef
 
 // Where the user was when the screen locked, so waking returns there instead of to Home.
 // Advanced settings (PIN) and edit screens are not resumed: they come back as Settings.
+static int setupStep = 0;
 static Mode resumeMode = M_HOME;
 static int resumeConv = -1;
 static char resumeDraft[160];
@@ -268,6 +270,7 @@ static void rememberPlace() {
 static void wake() {
   setBacklight(cfg().brightness);
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
+  if (!cfg().setupDone) { openSetup(setupStep); return; }   // first boot, or locked part-way
   Mode m = resumeMode;
   resumeMode = M_HOME;
   switch (m) {
@@ -345,6 +348,8 @@ static void goBack() {
   }
   if (mode == M_THREAD) { openConvs(); return; }
   if (mode == M_DETAIL) { int c = detailConv; detailConv = -1; openThread(c); return; }
+  if (mode == M_PICK && returnTo == M_SETUP) { openSetup(2); return; }
+  if (mode == M_SETUP) return;                         // the setup has its own Back button
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
     if (returnTo == M_ADV) openAdvanced();
     else if (returnTo == M_SIGNAL) openSignal();
@@ -1074,7 +1079,7 @@ static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f,
 static constexpr int BW_N = 10;
 
 enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
-enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_RESET, AD_INFO };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
 
@@ -1364,6 +1369,138 @@ static void pickTimeout(int i) {
   settings_changed();
   openSettings();
 }
+
+// ── First-boot setup: welcome, name, time zone, a few tips ───────
+static void setupNext();
+static void setupBackCb(lv_event_t*) { if (setupStep > 0) openSetup(setupStep - 1); }
+static void setupNextCb(lv_event_t*) { setupNext(); }
+
+static void pickSetupZone(int i) {
+  cfg().tzMinutes = zones[constrain(i, 0, ZONE_N - 1)].minutes;
+  settings_changed();
+  openSetup(2);
+}
+static void setupZoneCb(lv_event_t*) {
+  char off[16];
+  for (int i = 0; i < ZONE_N; i++) {
+    fmtOffset(zones[i].minutes, off, sizeof(off));
+    snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s  %s", zones[i].name, off);
+  }
+  openPicker("Time zone", ZONE_N, zoneIndex(), pickSetupZone, M_SETUP);
+}
+static void setupDstCb(lv_event_t*) {
+  cfg().dst = cfg().dst ? 0 : 1;
+  settings_changed();
+  openSetup(2);
+}
+
+static void setupNext() {
+  if (setupStep == 1) {
+    if (!taInput) return;
+    char clean[32];
+    strncpy(clean, lv_textarea_get_text(taInput), sizeof(clean) - 1);
+    clean[sizeof(clean) - 1] = 0;
+    int n = strlen(clean);
+    while (n > 0 && clean[n - 1] == ' ') clean[--n] = 0;
+    if (n == 0) { toast("Please enter a name"); return; }
+    strncpy(cfg().name, clean, sizeof(cfg().name) - 1);
+    settings_changed();
+    if (actions.setName) actions.setName(clean);
+    strncpy(lastName, clean, sizeof(lastName) - 1);
+    openSetup(2);
+  } else if (setupStep >= 3) {
+    cfg().setupDone = 1;
+    settings_changed();
+    showHome();
+  } else {
+    openSetup(setupStep + 1);
+  }
+}
+
+static void openSetup(int step) {
+  mode = M_SETUP;
+  setupStep = constrain(step, 0, 3);
+  taInput = nullptr;
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_t* s = newScreen();
+  static const char* const titles[4] = { "Welcome", "Your name", "Time zone", "All set" };
+  lv_obj_t* t = label(s, titles[setupStep], &font_tdos_20, TEXT);
+  lv_obj_set_pos(t, 16, 40);
+  char pg[12];
+  snprintf(pg, sizeof(pg), "%d of 4", setupStep + 1);
+  lv_obj_t* pl = label(s, pg, &font_tdos_12, MUTE);
+  lv_obj_align(pl, LV_ALIGN_TOP_RIGHT, -16, 46);
+
+  auto button = [&](const char* text, int x, int w, uint32_t col, uint32_t txt, lv_event_cb_t cb) {
+    lv_obj_t* b = tappable(box(s, w, 40, col, 14));
+    lv_obj_set_pos(b, x, 194);
+    lv_obj_center(label(b, text, &font_tdos_16, txt));
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+  };
+
+  if (setupStep == 0) {
+    lv_obj_t* l = label(s, "A mesh messenger that works on its own, no phone needed.\n\nA few quick questions first.", &font_tdos_14, TEXT);
+    lv_obj_set_width(l, 288);
+    lv_obj_set_pos(l, 16, 80);
+    button("Start", 12, 296, ACCENT, INK, setupNextCb);
+  } else if (setupStep == 1) {
+    lv_obj_t* h = label(s, "How other people see you on the mesh.", &font_tdos_12, MUTE);
+    lv_obj_set_pos(h, 16, 76);
+    taInput = lv_textarea_create(s);
+    lv_obj_set_size(taInput, 296, 44);
+    lv_obj_set_pos(taInput, 12, 104);
+    lv_textarea_set_one_line(taInput, true);
+    lv_textarea_set_max_length(taInput, 31);
+    lv_textarea_set_text(taInput, lastName);
+    lv_obj_set_style_bg_color(taInput, C(RAISE), 0);
+    lv_obj_set_style_bg_opa(taInput, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(taInput, C(TEXT), 0);
+    lv_obj_set_style_text_font(taInput, &font_tdos_20, 0);
+    lv_obj_set_style_pad_hor(taInput, 12, 0);
+    lv_obj_set_style_border_color(taInput, C(ACCENT), 0);
+    lv_obj_set_style_border_width(taInput, 2, 0);
+    lv_obj_set_style_radius(taInput, 14, 0);
+    lv_obj_set_style_border_side(taInput, LV_BORDER_SIDE_LEFT, LV_PART_CURSOR);
+    lv_obj_set_style_border_width(taInput, 2, LV_PART_CURSOR);
+    lv_obj_set_style_border_color(taInput, C(ACCENT), LV_PART_CURSOR);
+    lv_obj_set_style_bg_opa(taInput, LV_OPA_TRANSP, LV_PART_CURSOR);
+    lv_obj_set_style_anim_time(taInput, 450, LV_PART_CURSOR);
+    if (!inputGroup) inputGroup = lv_group_create();
+    lv_group_add_obj(inputGroup, taInput);
+    lv_group_focus_obj(taInput);
+    button("Back", 12, 140, RAISE2, TEXT, setupBackCb);
+    button("Next", 168, 140, ACCENT, INK, setupNextCb);
+  } else if (setupStep == 2) {
+    char off[16], b[48];
+    fmtOffset(cfg().tzMinutes, off, sizeof(off));
+    int z = zoneIndex();
+    lv_obj_t* zl = label(s, z >= 0 ? zones[z].name : off, &font_tdos_20, ACCENT);
+    lv_obj_set_pos(zl, 16, 68);
+    lv_obj_t* ol = label(s, off, &font_tdos_12, MUTE);
+    lv_obj_set_pos(ol, 16, 94);
+    lv_obj_t* zb = tappable(box(s, 144, 40, RAISE2, 12));
+    lv_obj_set_pos(zb, 12, 114);
+    lv_obj_center(label(zb, "Change zone", &font_tdos_14, TEXT));
+    lv_obj_add_event_cb(zb, setupZoneCb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* db = tappable(box(s, 144, 40, RAISE2, 12));
+    lv_obj_set_pos(db, 168, 114);
+    snprintf(b, sizeof(b), "Daylight saving: %s", cfg().dst ? "On" : "Off");
+    lv_obj_center(label(db, b, &font_tdos_12, TEXT));
+    lv_obj_add_event_cb(db, setupDstCb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* hl = label(s, "The clock shows local time once GPS or the mesh provides the time.", &font_tdos_12, MUTE);
+    lv_obj_set_width(hl, 296);
+    lv_obj_set_pos(hl, 16, 160);
+    button("Back", 12, 140, RAISE2, TEXT, setupBackCb);
+    button("Next", 168, 140, ACCENT, INK, setupNextCb);
+  } else {
+    lv_obj_t* l = label(s, "\xE2\x80\xA2 Swipe in from the left edge: back\n\xE2\x80\xA2 Swipe up from the bottom edge: Home\n\xE2\x80\xA2 Swipe down from the top: quick menu\n\xE2\x80\xA2 Settings has GPS, sounds and radio", &font_tdos_14, TEXT);
+    lv_obj_set_width(l, 296);
+    lv_obj_set_pos(l, 16, 80);
+    button("Get started", 12, 296, ACCENT, INK, setupNextCb);
+  }
+  loadApp(s);
+}
+
 static void pickZone(int i) {
   cfg().tzMinutes = zones[constrain(i, 0, ZONE_N - 1)].minutes;
   settings_changed();
@@ -1529,6 +1666,7 @@ static void fillAdvanced() {
   addRow("TX power", b, AD_PWR, K_NAV);
   addRow("Send advert", "Send", AD_ADVERT, K_BUTTON);
   addRow("PIN", "Change", AD_PIN, K_BUTTON);
+  addRow("Run setup again", "Start", AD_SETUP, K_BUTTON);
   addRow(resetArmed ? "Tap again to confirm" : "Restore defaults", resetArmed ? "Confirm" : "Restore", AD_RESET, K_BUTTON);
   if (resetArmed) lv_obj_set_style_bg_color(listRows[listN - 1], C(0x4A1F1A), 0);
   addRow("Build", "MeshCore 1.x", AD_INFO, K_INFO);
@@ -1632,6 +1770,11 @@ static void advAct(int id) {
       c.pinSet = 0;
       settings_changed();
       openPin();                         // straight into "choose a PIN", one transition
+      return;
+    case AD_SETUP:                       // e.g. when handing the device to someone else
+      cfg().setupDone = 0;
+      settings_changed();
+      openSetup(0);
       return;
     case AD_RESET:
       if (!resetArmed) { resetArmed = true; fillAdvanced(); return; }
@@ -2049,7 +2192,7 @@ static void quickLockCb(lv_event_t*) { closeQuick(); pendingGesture = G_NONE; go
 static void quickSettingsCb(lv_event_t*) { closeQuick(); openSettings(); }
 
 static void openQuick() {
-  if (quickOpen || mode == M_LOCK) return;
+  if (quickOpen || mode == M_LOCK || mode == M_SETUP) return;
   quickOpen = true;
   // The backdrop dims the screen and catches any tap outside the panel as "close".
   quickBackdrop = tappable(box(lv_layer_top(), 320, 240, 0x000000, 0));
@@ -2458,7 +2601,7 @@ void ui_activity() { lastActivityMs = millis(); }
 static void runGesture() {
   Gesture g = pendingGesture;
   pendingGesture = G_NONE;
-  if (g == G_NONE || mode == M_LOCK) return;
+  if (g == G_NONE || mode == M_LOCK || mode == M_SETUP) return;
   ui_activity();
   if (quickOpen) { closeQuick(true); return; }           // any edge swipe first dismisses the panel
   if (g == G_QUICK) { openQuick(); return; }
@@ -2608,6 +2751,7 @@ void ui_click() {
   else if (mode == M_CONVS && convN > 0) openThread(convOrder[convSel]);
   else if (mode == M_THREAD) doSend();
   else if (mode == M_ENTRY) entrySave();
+  else if (mode == M_SETUP) setupNext();
   else if (mode == M_SIGNAL) sigSend();
   else if (mode == M_MAP) mapview_centre_on_me();
   else if ((mode == M_SETTINGS || mode == M_ADV || mode == M_PICK) && listN > 0) {
@@ -2620,6 +2764,7 @@ void ui_click() {
 void ui_long() {
   ui_activity();
   if (mode == M_LOCK) { wake(); return; }
+  if (mode == M_SETUP) return;
   showHome();
 }
 
@@ -2643,6 +2788,14 @@ void ui_key(char c) {
     if (c == '-' || c == '_') { mapview_zoom(-1); return; }
     if (c == 'c' || c == 'C') { mapview_centre_on_me(); return; }
     if (c == 8 || c == 127) { goBack(); return; }
+    return;
+  }
+  if (mode == M_SETUP) {
+    if (c == '\r' || c == '\n') { setupNext(); return; }
+    if (setupStep == 1 && taInput) {
+      if (c == 8 || c == 127) lv_textarea_del_char(taInput);
+      else if (c >= 32 && c < 127) lv_textarea_add_char(taInput, (uint32_t)c);
+    }
     return;
   }
   if (mode == M_ENTRY && taInput) {

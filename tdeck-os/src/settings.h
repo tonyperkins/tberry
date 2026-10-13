@@ -21,6 +21,7 @@ struct Settings {
   uint8_t volume;          // 0 (muted) to 100
   uint8_t channelSound;    // 0 never, 1 only when mentioned (default), 2 every channel message
   uint8_t gpsEnabled;      // 0 off after the start-up time window, 1 always on (default)
+  uint8_t setupDone;       // 0 until the first-boot setup has been completed
   uint8_t screenTimeout;   // index into the timeout list in ui.cpp: 30 s, 1 min (default), 2, 5, 10 min, never
 };
 
