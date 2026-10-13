@@ -192,9 +192,23 @@ static void checkTask(void*) {
     vTaskDelete(nullptr);
     return;
   }
-  String body = http.getString();
+  // The manifest is tiny: read at most 2 KB, so a wrong address cannot make us buffer a big file.
+  static char body[2048];
+  size_t blen = 0;
+  {
+    WiFiClient* bs = http.getStreamPtr();
+    uint32_t t0 = millis();
+    while (blen < sizeof(body) - 1 && millis() - t0 < 8000 && (http.connected() || bs->available())) {
+      int n = bs->available();
+      if (n <= 0) { delay(5); continue; }
+      int got = bs->readBytes(body + blen, min<size_t>(n, sizeof(body) - 1 - blen));
+      if (got > 0) blen += got;
+    }
+    body[blen] = 0;
+  }
+  bool tooBig = blen >= sizeof(body) - 1;
   http.end();
-  if (body.length() > 2000 || !parseManifest(body.c_str())) { fail("Update information is not valid"); vTaskDelete(nullptr); return; }
+  if (tooBig || !parseManifest(body)) { fail("Update information is not valid"); vTaskDelete(nullptr); return; }
   snprintf(st.version, sizeof(st.version), "%s", man.version);
   st.size = man.size;
   st.done = 0;
