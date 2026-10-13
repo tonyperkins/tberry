@@ -13,7 +13,8 @@ parameters, PIN-protected) still reachable.
 
 - **Messages**: direct messages with delivery ticks and round-trip time, and channels (the Public
   channel is preconfigured). Replies use the `@[Name]` convention; tap a message to reply, hold it for
-  details. Quoted parents, reactions shown as badges, mentions of you highlighted.
+  details. Quoted parents, reactions shown as badges, mentions of you highlighted. The message box has
+  an emoji picker and a button to clear the text; emoji are drawn from the SD card.
 - **Message details**: route, hop count, SNR and RSSI, the repeater path (named when unambiguous),
   clock difference, airtime, how many copies were heard.
 - **Signal**: one-tap range test to a contact (round trip, hops, RSSI, SNR), logged to the SD card.
@@ -22,10 +23,14 @@ parameters, PIN-protected) still reachable.
   this message came from".
 - **Status**: battery, uptime, packets, airtime, storage, health, and GPS detail (fix, satellites,
   accuracy, altitude, speed).
-- **Settings**: name, time zone, daylight saving, GPS, brightness, volume, channel sounds, and a
-  PIN-protected **Advanced** area for the radio (preset, frequency, bandwidth, SF, CR, TX power).
-- **Interface**: lock screen, home grid, edge swipes (left edge: back, bottom edge: home, top edge:
-  quick panel with brightness, volume, advert, lock, GPS), sound effects, emoji from the SD card.
+- **Settings**: name, time zone, daylight saving, GPS, brightness, volume, channel sounds, screen
+  timeout, and a PIN-protected **Advanced** area for the radio (preset, frequency, bandwidth, SF, CR,
+  TX power) with Send advert, Run setup again and Restore defaults.
+- **First-boot setup**: a four-screen guide (welcome, name, time zone, gesture tips) the first time a
+  new device is woken. It can be run again from Settings, Advanced.
+- **Interface**: lock screen that resumes the screen you were on (including an unsent message),
+  home grid, edge swipes (left edge: back, bottom edge: home, top edge: quick panel with brightness,
+  volume, advert, lock, GPS), sound effects.
 
 ## Repository layout
 
@@ -70,7 +75,22 @@ FAT32. Everything is optional; without a card the device works but does not keep
 /tdos/idlog.csv         research log for reaction codes (see TDOS-008)
 /maps/<z>/<x>/<y>.png   map tiles   (see tdeck-maps/README.md)
 /emoji/<codepoint>.bin  emoji images (see tdeck-os/tools/make_emoji_pack.py)
+/emoji/pack.bin         the same images in one file (see below)
 ```
+
+### Emoji pack
+
+`tdeck-os/tools/make_emoji_pack.py` converts the Noto emoji into small image files. Copy the output
+folder to the card as `/emoji/`, then bundle it with
+
+```sh
+python3 tdeck-os/tools/pack_emoji.py emoji emoji/pack.bin
+```
+
+and put `pack.bin` in `/emoji/` too. Looking up one file among 1,400 on a FAT card takes tens of
+milliseconds, which made the emoji picker take seconds to open. With `pack.bin` the firmware reads
+everything into PSRAM once at start-up (about a second, 864 KB) and lookups are instant. Without it,
+emoji still work, just slower.
 
 Mount the card without the `flush` option when copying tens of thousands of tiles
 (`mount -o noatime,async`): the desktop default is roughly 30 times slower.
@@ -84,6 +104,8 @@ live in the device's own flash, never on the removable card.
 
 - Reaction codes are not decoded, so sending reactions is not implemented (TDOS-008).
 - The thread view draws only the newest 36 messages of a conversation.
+- The message box takes emoji from the picker only; the T-Deck keyboard has no emoji keys, and
+  holding a key does not repeat (the keyboard sends one event per press).
 - No real-time clock chip: the clock is blank after power-up until GPS or a mesh advert provides the
   time.
 - The font covers Latin-1 and Latin Extended-A; other scripts show as `?`.
