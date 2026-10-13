@@ -19,6 +19,7 @@
 #include "emoji.h"
 #include "audio.h"
 #include "reaction.h"
+#include "mention.h"
 
 extern TFT_eSPI tft;
 
@@ -109,6 +110,8 @@ static int sel = 0;                      // 0..5, the highlighted home tile
 static int convSel = 0;                  // highlighted row in the conversation list
 static int convOrder[MAX_CONVS], convN = 0;
 static int curConv = -1;                 // conversation open in the thread view
+static constexpr int THREAD_WINDOW = 36;       // newest messages drawn; older ones stay in the store
+static lv_obj_t* threadRows[MSGS_PER_CONV];
 static int mapReturnConv = -1;           // conversation to go back to when the map was opened from a message
 static uint32_t shownVersion = 0;
 static char dbgCache[720];
@@ -464,6 +467,35 @@ static void bubbleTapCb(lv_event_t* e) {
   insertMention(m->sender);
 }
 
+// Do a mention's name and a message's raw sender name refer to the same person? The stored text has
+// been through the sanitiser (joiners removed), so compare against the sanitised sender as well.
+static bool sameName(const char* mention, const char* rawSender) {
+  if (!rawSender[0]) return false;
+  if (strcmp(mention, rawSender) == 0) return true;
+  char cleaned[40];
+  msgs_clean(cleaned, sizeof(cleaned), rawSender);
+  return strcmp(mention, cleaned) == 0;
+}
+
+// The message a reply at index `i` is answering: the latest earlier message from the person it
+// mentions (or from us, when someone has mentioned this node), skipping reactions.
+static int findParent(int conv, int i, const char* mentioned) {
+  bool aboutUs = lastName[0] && strcmp(mentioned, lastName) == 0;
+  for (int j = i - 1; j >= 0 && j >= i - 80; j--) {
+    const Msg* p = msgs_at(conv, j);
+    if (!p) break;
+    char a[40], e[24], cd[12];
+    if (parseReaction(p->text, a, sizeof(a), e, sizeof(e), cd, sizeof(cd))) continue;
+    if (aboutUs ? p->out : (!p->out && sameName(mentioned, p->sender))) return j;
+  }
+  return -1;
+}
+
+static void quoteTapCb(lv_event_t* e) {
+  int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  if (idx >= 0 && idx < MSGS_PER_CONV && threadRows[idx]) lv_obj_scroll_to_view(threadRows[idx], LV_ANIM_ON);
+}
+
 // The position a message's sender advertised, if we know one. Channel messages carry only the
 // sender's name, so those match by name; direct messages are exact, by key.
 static bool messagePosition(const Conv* c, const Msg* m, int32_t* lat, int32_t* lon, char* name, size_t n) {
@@ -492,9 +524,11 @@ static void showOnMapCb(lv_event_t* e) {
 static void buildThread() {
   if (!thrBox) return;
   lv_obj_clean(thrBox);
+  memset(threadRows, 0, sizeof(threadRows));
   const Conv* c = msgs_conv(curConv);
   if (!c) return;
-  for (int i = 0; i < c->count; i++) {
+  int first = max(0, c->count - THREAD_WINDOW);
+  for (int i = first; i < c->count; i++) {
     const Msg* m = msgs_at(curConv, i);
 
     // A reaction (@[Author]<emoji> <code>) is not a bubble: one quiet line, without the code.
@@ -525,6 +559,7 @@ static void buildThread() {
     // then placed in the row: both have to say END for a sent message to sit at the right edge.
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START,
                           m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START);
+    threadRows[i] = row;
 
     bool channelIn = !m->out && c->channel && m->sender[0];
     if (channelIn) {
@@ -533,6 +568,32 @@ static void buildThread() {
       lv_obj_t* cap = label(row, who, emoji_font(&font_tdos_12), avatarColor(m->sender));
       lv_obj_set_style_max_width(cap, 236, 0);
       lv_label_set_long_mode(cap, LV_LABEL_LONG_CLIP);
+    }
+
+    // A reply in a channel starts "@[Name]": show what it answers, as other apps do (TDOS-007).
+    char qName[40];
+    if (c->channel && leadingMention(m->text, qName, sizeof(qName))) {
+      int pj = findParent(curConv, i, qName);
+      char qShown[160], who[48];
+      emoji_filter(qName, who, sizeof(who), true);
+      if (pj >= 0) snprintf(qShown, sizeof(qShown), "%s: %s", who, msgs_at(curConv, pj)->text);
+      else snprintf(qShown, sizeof(qShown), "reply to %s", who);
+      char qFiltered[170];
+      emoji_filter(qShown, qFiltered, sizeof(qFiltered), true);
+      lv_obj_t* q = lv_label_create(row);
+      lv_label_set_text(q, qFiltered);
+      lv_obj_set_style_text_font(q, emoji_font(&font_tdos_12), 0);
+      lv_obj_set_style_text_color(q, C(MUTE), 0);
+      lv_label_set_long_mode(q, LV_LABEL_LONG_DOT);        // ends in "..." instead of running on
+      lv_obj_set_width(q, 224);
+      lv_obj_set_style_border_side(q, LV_BORDER_SIDE_LEFT, 0);
+      lv_obj_set_style_border_width(q, 2, 0);
+      lv_obj_set_style_border_color(q, C(pj >= 0 ? ACCENT : LINE), 0);
+      lv_obj_set_style_pad_left(q, 6, 0);
+      if (pj >= first && pj >= 0) {                        // the parent is on screen: tap to jump to it
+        lv_obj_add_flag(q, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(q, quoteTapCb, LV_EVENT_CLICKED, (void*)(intptr_t)pj);
+      }
     }
 
     lv_obj_t* b = lv_obj_create(row);
@@ -2177,3 +2238,9 @@ void ui_key(char c) {
 }
 
 bool ui_console_active() { return mode == M_DBG; }
+
+uint32_t ui_lvgl_free() {
+  lv_mem_monitor_t mon;
+  lv_mem_monitor(&mon);
+  return mon.free_size;
+}

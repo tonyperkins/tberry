@@ -41,7 +41,8 @@ void ui_nav(int dx, int dy);          // trackball step
 void ui_click();                      // trackball click
 void ui_long();                       // trackball long press: go Home
 void ui_key(char c);                  // keyboard character
-bool ui_console_active();             // true while the debug console owns the keyboard
+bool ui_console_active();
+uint32_t ui_lvgl_free();                // bytes free in LVGL's heap, for the diagnostic log             // true while the debug console owns the keyboard
 void ui_activity();                   // any input counts as activity (keeps the screen awake)
 
 // Called when the user sends from a conversation. main.cpp records the outgoing message in the

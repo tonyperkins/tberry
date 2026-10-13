@@ -2,6 +2,7 @@
 // In-memory message store. The mesh callbacks write into it, the UI reads from it.
 // Conversations are keyed by the first 4 bytes of a contact's public key; the Public channel
 // uses the reserved key below. Message text lives in PSRAM.
+#include <stddef.h>
 #include <stdint.h>
 
 enum MsgStatus : uint8_t { MS_SENDING = 0, MS_SENT = 1, MS_DELIVERED = 2, MS_FAILED = 3, MS_RECEIVED = 4 };
@@ -37,7 +38,7 @@ struct Msg {
 };
 
 static constexpr int MAX_CONVS = 24;
-static constexpr int MSGS_PER_CONV = 30;
+static constexpr int MSGS_PER_CONV = 100;   // held in PSRAM; the thread view draws only the newest few
 static constexpr uint8_t CHANNEL_KEY[4] = { 0xFF, 0xFF, 0xFF, 0xFF };   // the Public channel
 
 struct Conv {
@@ -66,6 +67,8 @@ void msgs_set_open(int conv);                                         // the con
 int msgs_unread_total();
 int msgs_sorted(int* out, int max);                                   // channel first, then newest activity
 uint32_t msgs_version();
+// The same cleaning the store applies to incoming text, so names can be compared with stored text.
+void msgs_clean(char* dst, size_t n, const char* src);
 
 // Storage hooks. The store itself knows nothing about SD cards: whoever persists messages
 // registers a sink and is told about every new message and every status change.

@@ -38,6 +38,7 @@ static void cleanText(char* dst, size_t n, const char* src) {
 }
 
 static Conv convs[MAX_CONVS];
+void msgs_clean(char* dst, size_t n, const char* src) { cleanText(dst, n, src); }
 static uint32_t version = 1, nextId = 1;
 static int openConv = -1;
 static const MsgSink* sink = nullptr;     // survives msgs_init(): registered once at boot

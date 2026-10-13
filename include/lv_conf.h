@@ -8,7 +8,7 @@
 #define LV_COLOR_DEPTH 16
 #define LV_COLOR_16_SWAP 0            /* TFT_eSPI::pushColors(..., swap=true) swaps on the way out */
 
-#define LV_MEM_SIZE (64U * 1024U)     /* internal RAM; PSRAM is reserved for later maps */
+#define LV_MEM_SIZE (80U * 1024U)     /* internal RAM; raised from 64 KB for deeper threads */
 
 #define LV_DISP_DEF_REFR_PERIOD 30
 #define LV_INDEV_DEF_READ_PERIOD 30

@@ -1,6 +1,6 @@
 # TDOS-007: Show the message being replied to above a reply
 
-**Type:** feature  **Status:** open  **Area:** Messages (thread view)  **Depends on:** TDOS-003
+**Type:** feature  **Status:** done  **Area:** Messages (thread view)  **Depends on:** TDOS-003
 
 ## Why
 In a busy channel a reply such as `@[Greg] morning from Trenton TX!` is meaningless without what it
@@ -38,6 +38,19 @@ shared channel readable as conversations.
   several lines. That is how the other apps behave too, and is accepted.
 - Consider a "thread view" later (tap the thread icon to see the parent and every reply), but it is not
   needed for this ticket.
+
+## As built
+- A channel message starting `@[Name]` shows one muted line above its bubble, `Name: parent text`,
+  cut with an ellipsis, with an amber bar when the parent was found and a grey bar for a plain
+  "reply to Name" when it was not.
+- The parent is the latest earlier message from that person (reactions skipped). When the mention is
+  of this node, the parent is our own latest sent message. Names are compared raw and sanitised so
+  names with joiners still match.
+- Tapping the quote scrolls to the parent when it is among the drawn messages.
+- The store now keeps **100** messages per conversation (PSRAM); the thread view draws the newest **36**,
+  because every bubble is several UI objects and LVGL's heap is 80 KB (raised from 64 KB).
+- `src/mention.h` and `tests/mention_test.cpp` cover the mention parser.
+- The thread icon and a full thread view are not built.
 
 ## Open questions
 - Hide the leading `@[Name]` in the reply bubble when a quote is shown, or keep it as sent? Other apps

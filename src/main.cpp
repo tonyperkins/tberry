@@ -812,7 +812,7 @@ void loop() {
   ui_tick();
   if (now - lastLog >= 5000) {
     lastLog = now;
-    logf("i2c: %s\n", i2cFound);
+    logf("i2c: %s  lvgl free %lu\n", i2cFound, (unsigned long)ui_lvgl_free());
     logf("up=%lus contacts=%d loopmax=%lums heap=%u ball U%lu D%lu L%lu R%lu\n", (unsigned long)(now / 1000),
          theMesh ? theMesh->getNumContacts() : 0, (unsigned long)loopMax, (unsigned)ESP.getFreeHeap(),
          (unsigned long)isrUp, (unsigned long)isrDown, (unsigned long)isrLeft, (unsigned long)isrRight);
