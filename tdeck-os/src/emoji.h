@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 void emoji_init();                       // after the SD card is mounted and LVGL is up
+bool emoji_available(uint32_t cp);      // this emoji has an image on the card
 bool emoji_pack_present();               // at least the pack folder exists on the card
 const lv_font_t* emoji_font(const lv_font_t* text_font);   // text font + inline emoji, or text_font
 // Copy `src` to `dst`. With keepAvailable, emoji that have an image on the card are kept and the

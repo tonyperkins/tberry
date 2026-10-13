@@ -80,6 +80,8 @@ static lv_obj_t *bar, *barTime, *barSig, *barBatt;
 static lv_obj_t *lockTime, *lockDate, *lockMesh;
 static lv_obj_t *tiles[6], *badge, *badgeLbl;
 static lv_obj_t *dbgLabel, *convBox, *thrBox, *taInput;
+static lv_obj_t *pickerObj, *pickerGrids[4], *pickerTabs[4];   // emoji picker over the thread
+static int pickerTab = 0;
 static lv_group_t* inputGroup = nullptr;   // gives the message box the focus state that shows its cursor
 static lv_obj_t* listBox;                // scrolling list used by Settings and Advanced
 static int listN = 0, listSel = 0;
@@ -226,7 +228,7 @@ static void setSel(int i) {
 }
 
 static void releaseApp() {            // forget pointers into the app screen before it goes away
-  dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr;
+  dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr; pickerObj = nullptr; for (auto& g : pickerGrids) g = nullptr;
   if (mapview_active()) mapview_destroy();
   listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
   brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; stBox = nullptr; stPill = nullptr; stNote = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
@@ -279,7 +281,14 @@ static void tileCb(lv_event_t* e) { openApp((int)(intptr_t)lv_event_get_user_dat
 static void openSettings();
 static void openAdvanced();
 static void openSignal();
+static bool closePicker() {
+  if (!pickerObj) return false;
+  lv_obj_del(pickerObj);
+  pickerObj = nullptr; for (auto& g : pickerGrids) g = nullptr;
+  return true;
+}
 static void goBack() {
+  if (closePicker()) return;                          // back closes the emoji picker first
   if (mode == M_MAP && mapReturnConv >= 0) {          // from a message: back to that conversation
     int c = mapReturnConv;
     mapReturnConv = -1;
@@ -710,6 +719,163 @@ static void buildThread() {
   lv_obj_scroll_to_y(thrBox, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
+
+// ── Emoji picker: a panel over the thread with a few pages of common emoji ──
+// Only emoji that have an image on the card are listed. Symbols in the old BMP range get a
+// variation selector appended so other clients show them as emoji, not as text glyphs.
+static const uint32_t PICK_HANDS[] = { 0x1F44D, 0x1F44E, 0x1F44F, 0x1F64C, 0x1F64F, 0x1F44B, 0x1F91D, 0x270C, 0x1F44C, 0x1F4AA,
+  0x1F44A, 0x270A, 0x270B, 0x1F918, 0x1F91E, 0x1F449, 0x1F448, 0x1F446, 0x1F447, 0x261D, 0x1F590, 0x1F91A, 0x1F485, 0x1F440,
+  0x1F9E0, 0x1F64B, 0x1F926, 0x1F937, 0x1F645, 0x1F646, 0x1F481, 0x1F6B6, 0x1F3C3, 0x1F483, 0x1F57A };
+static const uint32_t PICK_SYMBOLS[] = { 0x2764, 0x1F9E1, 0x1F49B, 0x1F49A, 0x1F499, 0x1F49C, 0x1F5A4, 0x1F90D, 0x1F494, 0x1F495,
+  0x1F496, 0x1F4AF, 0x2728, 0x1F525, 0x2B50, 0x1F31F, 0x26A1, 0x2705, 0x274C, 0x2757, 0x2753, 0x26A0, 0x1F389, 0x1F38A,
+  0x1F4A5, 0x1F4A4, 0x1F4A6, 0x1F6D1, 0x2139, 0x1F51D, 0x1F198, 0x1F197, 0x1F192, 0x27A1, 0x2B05, 0x2B06, 0x2B07 };
+static const uint32_t PICK_THINGS[] = { 0x1F4E1, 0x1F4FB, 0x1F50B, 0x1F4CD, 0x1F9ED, 0x1F5FA, 0x1F3D4, 0x1F332, 0x1F333, 0x2600,
+  0x1F327, 0x26C8, 0x1F308, 0x2744, 0x1F30A, 0x1F697, 0x1F699, 0x1F69B, 0x1F3D5, 0x1F3E0, 0x1F3E2, 0x2615, 0x1F37A, 0x1F355,
+  0x1F354, 0x1F32E, 0x1F36A, 0x1F3B5, 0x1F3AE, 0x1F4F7, 0x1F4F1, 0x1F4BB, 0x1F527, 0x1F511, 0x1F4A1, 0x23F0, 0x1F6A8 };
+
+static int pickerList(int tab, uint32_t* out, int cap) {
+  int n = 0;
+  auto add = [&](uint32_t cp) { if (n < cap && emoji_available(cp)) out[n++] = cp; };
+  if (tab == 0) {
+    for (uint32_t c = 0x1F600; c <= 0x1F64F; c++) add(c);
+    for (uint32_t c = 0x1F910; c <= 0x1F92F; c++) add(c);
+    for (uint32_t c = 0x1F970; c <= 0x1F97A; c++) add(c);
+  } else {
+    const uint32_t* l = tab == 1 ? PICK_HANDS : tab == 2 ? PICK_SYMBOLS : PICK_THINGS;
+    int len = tab == 1 ? (int)(sizeof(PICK_HANDS) / 4) : tab == 2 ? (int)(sizeof(PICK_SYMBOLS) / 4) : (int)(sizeof(PICK_THINGS) / 4);
+    for (int i = 0; i < len; i++) add(l[i]);
+  }
+  return n;
+}
+
+static void pickEmojiCb(lv_event_t* e) {
+  if (!taInput) return;
+  uint32_t cp = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+  char u[8];
+  int n = 0;
+  if (cp >= 0x10000) {
+    u[n++] = (char)(0xF0 | (cp >> 18)); u[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[n++] = (char)(0x80 | (cp & 0x3F));
+  } else {
+    u[n++] = (char)(0xE0 | (cp >> 12)); u[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[n++] = (char)(0x80 | (cp & 0x3F));
+    u[n++] = (char)0xEF; u[n++] = (char)0xB8; u[n++] = (char)0x8F;       // U+FE0F: show as emoji
+  }
+  u[n] = 0;
+  lv_textarea_add_text(taInput, u);
+}
+
+// Only the page on show exists. LVGL's memory pool is small (about 70 KB free), so the cells share
+// two styles instead of each carrying its own, and the other pages are freed on a tab switch.
+static void pickerFill() {
+  if (!pickerObj) return;
+  for (int t = 0; t < 4; t++) {
+    if (pickerGrids[t] && t != pickerTab) { lv_obj_del(pickerGrids[t]); pickerGrids[t] = nullptr; }
+    if (pickerTabs[t]) {
+      lv_obj_set_style_bg_color(pickerTabs[t], C(t == pickerTab ? RAISE2 : RAISE), 0);
+      lv_obj_set_style_border_width(pickerTabs[t], t == pickerTab ? 2 : 0, 0);
+    }
+  }
+  if (pickerGrids[pickerTab]) return;
+
+  static lv_style_t gridSt, cellSt, cellPressSt, textSt;
+  static bool stylesReady = false;
+  const lv_font_t* f = emoji_font(&font_tdos_16);
+  if (!stylesReady) {
+    stylesReady = true;
+    lv_style_init(&gridSt);
+    lv_style_set_width(&gridSt, 320);
+    lv_style_set_height(&gridSt, 122 - 34);
+    lv_style_set_bg_opa(&gridSt, LV_OPA_TRANSP);
+    lv_style_set_border_width(&gridSt, 0);
+    lv_style_set_pad_all(&gridSt, 4);
+    lv_style_set_pad_row(&gridSt, 2);
+    lv_style_set_pad_column(&gridSt, 2);
+    lv_style_init(&cellSt);
+    lv_style_set_width(&cellSt, 30);
+    lv_style_set_height(&cellSt, 30);
+    lv_style_set_bg_opa(&cellSt, LV_OPA_TRANSP);
+    lv_style_set_border_width(&cellSt, 0);
+    lv_style_set_pad_all(&cellSt, 0);
+    lv_style_set_radius(&cellSt, 8);
+    lv_style_init(&cellPressSt);
+    lv_style_set_bg_color(&cellPressSt, C(RAISE2));
+    lv_style_set_bg_opa(&cellPressSt, LV_OPA_COVER);
+    lv_style_init(&textSt);
+    lv_style_set_text_color(&textSt, C(TEXT));
+  }
+  lv_style_set_text_font(&textSt, f);
+
+  lv_obj_t* grid = lv_obj_create(pickerObj);
+  pickerGrids[pickerTab] = grid;
+  lv_obj_remove_style_all(grid);
+  lv_obj_add_style(grid, &gridSt, 0);
+  lv_obj_set_pos(grid, 0, 32);
+  lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+  uint32_t list[80];
+  int n = pickerList(pickerTab, list, 80);
+  char one[8];
+  for (int i = 0; i < n; i++) {
+    uint32_t cp = list[i];
+    lv_obj_t* cell = lv_obj_create(grid);
+    lv_obj_remove_style_all(cell);
+    lv_obj_add_style(cell, &cellSt, 0);
+    lv_obj_add_style(cell, &cellPressSt, LV_STATE_PRESSED);
+    lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cell, LV_OBJ_FLAG_CLICKABLE);
+    int k = 0;
+    if (cp >= 0x10000) {
+      one[k++] = (char)(0xF0 | (cp >> 18)); one[k++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+      one[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); one[k++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+      one[k++] = (char)(0xE0 | (cp >> 12)); one[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); one[k++] = (char)(0x80 | (cp & 0x3F));
+    }
+    one[k] = 0;
+    lv_obj_t* l = lv_label_create(cell);
+    lv_obj_add_style(l, &textSt, 0);
+    lv_label_set_text(l, one);
+    lv_obj_center(l);
+    lv_obj_add_event_cb(cell, pickEmojiCb, LV_EVENT_CLICKED, (void*)(uintptr_t)cp);
+  }
+}
+
+static void pickerTabCb(lv_event_t* e) {
+  pickerTab = (int)(intptr_t)lv_event_get_user_data(e);
+  pickerFill();
+}
+
+static void togglePicker() {
+  if (closePicker()) return;
+  lv_obj_t* s = lv_scr_act();
+  pickerObj = box(s, 320, 122, RAISE, 0);
+  lv_obj_set_pos(pickerObj, 0, 58);
+  lv_obj_set_style_border_width(pickerObj, 1, 0);
+  lv_obj_set_style_border_color(pickerObj, C(LINE), 0);
+  lv_obj_add_flag(pickerObj, LV_OBJ_FLAG_CLICKABLE);       // taps on the panel never reach the thread
+  static const uint32_t tabCp[4] = { 0x1F600, 0x1F44D, 0x2764, 0x1F4E1 };
+  const lv_font_t* f = emoji_font(&font_tdos_16);
+  for (int t = 0; t < 4; t++) {
+    lv_obj_t* b = tappable(box(pickerObj, 78, 28, RAISE, 8));
+    lv_obj_set_pos(b, 4 + t * 79, 2);
+    lv_obj_set_style_border_color(b, C(ACCENT), 0);
+    lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
+    char u[8];
+    int k = 0;
+    uint32_t cp = tabCp[t];
+    if (cp >= 0x10000) {
+      u[k++] = (char)(0xF0 | (cp >> 18)); u[k++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+      u[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[k++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+      u[k++] = (char)(0xE0 | (cp >> 12)); u[k++] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[k++] = (char)(0x80 | (cp & 0x3F));
+    }
+    u[k] = 0;
+    lv_obj_center(label(b, u, f, TEXT));
+    lv_obj_add_event_cb(b, pickerTabCb, LV_EVENT_CLICKED, (void*)(intptr_t)t);
+    pickerTabs[t] = b;
+  }
+  pickerFill();
+}
+
 static void doSend() {
   if (!taInput || curConv < 0) return;
   const char* t = lv_textarea_get_text(taInput);
@@ -744,7 +910,8 @@ static void openThread(int conv) {
   lv_obj_set_flex_flow(thrBox, LV_FLEX_FLOW_COLUMN);
 
   taInput = lv_textarea_create(s);
-  lv_obj_set_size(taInput, 250, 52);                  // two lines of 16 pt text
+  const int taW = emoji_pack_present() ? 212 : 250;   // room for the emoji button
+  lv_obj_set_size(taInput, taW, 52);                  // two lines of 16 pt text
   lv_obj_set_pos(taInput, 6, 240 - 56);
   lv_textarea_set_one_line(taInput, false);
   lv_textarea_set_max_length(taInput, 140);
@@ -778,9 +945,19 @@ static void openThread(int conv) {
   lv_obj_center(sl);
   lv_obj_add_event_cb(send, sendCb, LV_EVENT_CLICKED, nullptr);
 
+  if (emoji_pack_present()) {
+    pickerTab = 0;
+    lv_obj_t* eb = tappable(box(s, 36, 52, RAISE, 14));
+    lv_obj_set_pos(eb, 6 + taW + 4, 240 - 56);
+    lv_obj_set_style_border_width(eb, 1, 0);
+    lv_obj_set_style_border_color(eb, C(LINE), 0);
+    lv_obj_center(label(eb, "\xF0\x9F\x98\x80", emoji_font(&font_tdos_16), TEXT));
+    lv_obj_add_event_cb(eb, [](lv_event_t*) { togglePicker(); }, LV_EVENT_CLICKED, nullptr);
+  }
+
   // Clear button inside the right edge of the box, shown only when there is text.
   lv_obj_t* clr = tappable(box(s, 28, 28, RAISE2, 14));
-  lv_obj_set_pos(clr, 6 + 250 - 32, 240 - 56 + 12);
+  lv_obj_set_pos(clr, 6 + taW - 32, 240 - 56 + 12);
   lv_obj_center(label(clr, LV_SYMBOL_CLOSE, &font_tdos_14, MUTE));
   lv_obj_add_flag(clr, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_event_cb(clr, [](lv_event_t* e) {

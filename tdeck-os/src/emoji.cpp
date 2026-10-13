@@ -36,7 +36,18 @@ static constexpr int CACHE_N = 384;
 static Entry cache[CACHE_N];
 static int cacheCount = 0;
 
+static Entry* packEntries = nullptr;      // from /emoji/pack.bin: all emoji in PSRAM, sorted by code point
+static int packCount = 0;
 static Entry* lookup(uint32_t cp) {
+  if (packEntries) {                               // one binary search, no card access
+    int lo = 0, hi = packCount - 1;
+    while (lo <= hi) {
+      int mid = (lo + hi) / 2;
+      if (packEntries[mid].cp == cp) return &packEntries[mid];
+      if (packEntries[mid].cp < cp) lo = mid + 1; else hi = mid - 1;
+    }
+    return nullptr;
+  }
   for (int i = 0; i < cacheCount; i++)
     if (cache[i].cp == cp) return cache[i].data ? &cache[i] : nullptr;
   if (cacheCount >= CACHE_N) return nullptr;       // full: further new emoji are left out
@@ -108,6 +119,42 @@ static bool pathCb(const lv_font_t*, void* img_src, uint16_t len, uint32_t unico
   return true;
 }
 
+// Reads /emoji/pack.bin (tools/pack_emoji.py) completely into PSRAM. Without it, emoji are read
+// from their own files on first use.
+static void loadPackFile() {
+  File f = SD.open("/emoji/pack.bin", FILE_READ);
+  if (!f) return;
+  uint8_t head[8];
+  if (f.read(head, 8) != 8 || memcmp(head, "EMJ1", 4) != 0) { f.close(); return; }
+  uint32_t count;
+  memcpy(&count, head + 4, 4);
+  size_t total = f.size();
+  size_t dataStart = 8 + (size_t)count * 12;
+  if (count == 0 || count > 20000 || dataStart >= total) { f.close(); return; }
+  uint8_t* table = (uint8_t*)heap_caps_malloc(count * 12, MALLOC_CAP_SPIRAM);
+  uint8_t* data = (uint8_t*)heap_caps_malloc(total - dataStart, MALLOC_CAP_SPIRAM);
+  Entry* ent = (Entry*)heap_caps_malloc(count * sizeof(Entry), MALLOC_CAP_SPIRAM);
+  bool ok = table && data && ent && f.read(table, count * 12) == count * 12;
+  for (size_t got = 0; ok && got < total - dataStart;) {      // 8 KB at a time keeps the SD driver happy
+    size_t n = min<size_t>(8192, total - dataStart - got);
+    ok = f.read(data + got, n) == n;
+    got += n;
+  }
+  f.close();
+  if (ok) {
+    for (uint32_t i = 0; i < count; i++) {
+      uint32_t cp, off, len;
+      memcpy(&cp, table + i * 12, 4); memcpy(&off, table + i * 12 + 4, 4); memcpy(&len, table + i * 12 + 8, 4);
+      if (off + len > total - dataStart || len > 65535) { ok = false; break; }
+      ent[i] = { cp, data + off, (uint16_t)len };
+    }
+  }
+  free(table);
+  if (!ok) { free(data); free(ent); return; }
+  packEntries = ent;
+  packCount = (int)count;
+}
+
 void emoji_init() {
   static lv_fs_drv_t drv;
   lv_fs_drv_init(&drv);
@@ -122,6 +169,7 @@ void emoji_init() {
   cacheCount = 0;
   packPresent = SD.exists("/emoji");
   if (!packPresent) return;
+  loadPackFile();
 
   // Image fonts: emoji come from files, everything else falls through to the text font.
   // The label takes its line height and baseline from the font it is given, so the image font
@@ -150,6 +198,7 @@ void emoji_init() {
 }
 
 bool emoji_pack_present() { return packPresent; }
+bool emoji_available(uint32_t cp) { return hasImage(cp); }
 
 const lv_font_t* emoji_font(const lv_font_t* text_font) {
   if (text_font == &font_tdos_14 && font14) return font14;
