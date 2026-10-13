@@ -12,13 +12,14 @@ static bool ready = false;
 static constexpr const char* DIR_MSGS = "/tdos/msgs";
 
 struct __attribute__((packed)) RecM { uint8_t type; uint8_t out; uint8_t status; uint8_t len; uint32_t id; uint32_t ts; };
-struct __attribute__((packed)) RecS { uint8_t type; uint8_t status; uint16_t pad; uint32_t id; };
+struct __attribute__((packed)) RecS { uint8_t type; uint8_t status; uint16_t rtt100; uint32_t id; };   // rtt100 was padding: old files read as 0
 
 // ── write queue (filled by the store's sink, drained by storage_tick) ──
 struct Ev {
   uint8_t key[4];
   uint8_t kind;               // 'M' or 'S'
   uint8_t out, status;
+  uint16_t rtt100;
   uint32_t id, ts;
   char text[164];
 };
@@ -41,11 +42,11 @@ static void sinkAdd(const uint8_t key[4], const Msg& m) {
   strncpy(e.text, m.text, sizeof(e.text) - 1);
   push(e);
 }
-static void sinkStatus(const uint8_t key[4], uint32_t id, uint8_t status) {
+static void sinkStatus(const uint8_t key[4], uint32_t id, uint8_t status, uint16_t rtt100) {
   if (!ready) return;
   Ev e = {};
   memcpy(e.key, key, 4);
-  e.kind = 'S'; e.status = status; e.id = id;
+  e.kind = 'S'; e.status = status; e.id = id; e.rtt100 = rtt100;
   push(e);
 }
 static const MsgSink sink = { sinkAdd, sinkStatus };
@@ -64,7 +65,7 @@ static void writeEvent(const Ev& e) {
     f.write((const uint8_t*)&r, sizeof(r));
     f.write((const uint8_t*)e.text, r.len);
   } else {
-    RecS r = { 'S', e.status, 0, e.id };
+    RecS r = { 'S', e.status, e.rtt100, e.id };
     f.write((const uint8_t*)&r, sizeof(r));
   }
   f.close();
@@ -102,6 +103,10 @@ static void compact(int conv) {
     RecM r = { 'M', (uint8_t)m->out, m->status, (uint8_t)strlen(m->text), m->id, m->ts };
     f.write((const uint8_t*)&r, sizeof(r));
     f.write((const uint8_t*)m->text, r.len);
+    if (m->rtt100) {
+      RecS s = { 'S', m->status, m->rtt100, m->id };
+      f.write((const uint8_t*)&s, sizeof(s));
+    }
   }
   f.close();
 }
@@ -139,7 +144,7 @@ void storage_load_messages() {
       } else if (type == 'S') {
         RecS r;
         if (f.read((uint8_t*)&r, sizeof(r)) != sizeof(r)) break;
-        msgs_set_status_loaded(conv, r.id, r.status);
+        msgs_set_status_loaded(conv, r.id, r.status, r.rtt100);
         records++;
       } else {
         break;                                         // damaged tail: ignore the rest

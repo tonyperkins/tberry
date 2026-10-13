@@ -4,7 +4,7 @@
 Usage:
   git clone --depth 1 --filter=blob:none --sparse https://github.com/googlefonts/noto-emoji.git
   (cd noto-emoji && git sparse-checkout set 2D/png/128)
-  python3 tools/make_emoji_pack.py noto-emoji/2D/png/128 emoji --size 18
+  python3 tools/make_emoji_pack.py noto-emoji/2D/png/128 emoji --size 14
 
 Then copy the output folder to the SD card as /emoji/ . Each file is named after its code point in
 lowercase hex (1f600.bin) and holds an LVGL 8 image: a 4-byte header followed by RGB565 + alpha,
@@ -36,7 +36,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src_dir")
     ap.add_argument("out_dir")
-    ap.add_argument("--size", type=int, default=18)
+    ap.add_argument("--size", type=int, default=14)
     ap.add_argument("--min-codepoint", type=lambda x: int(x, 16), default=0x2190,
                     help="skip code points below this (plain text characters), hex")
     a = ap.parse_args()

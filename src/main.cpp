@@ -179,8 +179,9 @@ protected:
   ContactInfo* processAck(const uint8_t* data) override {
     for (auto& p : _pending) {
       if (p.ack && memcmp(data, &p.ack, 4) == 0) {
-        msgs_set_status(p.conv, p.msgId, MS_DELIVERED);
-        chatPush("  delivered (%lu ms)", (unsigned long)(millis() - p.sentMs));
+        uint32_t rtt = millis() - p.sentMs;
+        msgs_set_status(p.conv, p.msgId, MS_DELIVERED, (uint16_t)min<uint32_t>(65535, max<uint32_t>(1, rtt / 100)));
+        chatPush("  delivered (%lu ms)", (unsigned long)rtt);
         p.ack = 0;                       // the same ACK can arrive more than once
         break;
       }

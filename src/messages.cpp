@@ -107,6 +107,7 @@ static uint32_t addInternal(int conv, uint32_t id, bool out, const char* text, u
   m.ts = ts;
   m.status = status;
   m.out = out;
+  m.rtt100 = 0;
   cleanText(m.text, sizeof(m.text), text);
   if (ts > c.lastTs) c.lastTs = ts;
   if (!loaded) {
@@ -124,21 +125,22 @@ uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint
   return addInternal(conv, id, out, text, ts, status, true);
 }
 
-static void setStatusInternal(int conv, uint32_t id, uint8_t status, bool loaded) {
+static void setStatusInternal(int conv, uint32_t id, uint8_t status, uint16_t rtt100, bool loaded) {
   if (conv < 0 || conv >= MAX_CONVS || !convs[conv].used) return;
   Conv& c = convs[conv];
   for (int i = 0; i < c.count; i++) {
     Msg& m = c.msgs[(c.start + i) % MSGS_PER_CONV];
     if (m.id == id) {
       m.status = status;
+      if (rtt100) m.rtt100 = rtt100;
       version++;
-      if (!loaded && sink && sink->onStatus) sink->onStatus(c.key, id, status);
+      if (!loaded && sink && sink->onStatus) sink->onStatus(c.key, id, status, rtt100);
       return;
     }
   }
 }
-void msgs_set_status(int conv, uint32_t id, uint8_t status) { setStatusInternal(conv, id, status, false); }
-void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status) { setStatusInternal(conv, id, status, true); }
+void msgs_set_status(int conv, uint32_t id, uint8_t status, uint16_t rtt100) { setStatusInternal(conv, id, status, rtt100, false); }
+void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt100) { setStatusInternal(conv, id, status, rtt100, true); }
 void msgs_set_sink(const MsgSink* s) { sink = s; }
 
 void msgs_mark_read(int conv) {

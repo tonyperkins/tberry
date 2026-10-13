@@ -365,6 +365,16 @@ static void openConvs() {
 }
 
 // ── Messages: a conversation ─────────────────────────────────────
+// "9:22 AM" in the user's time zone, or "" while the clock is not valid.
+static void formatClock(uint32_t ts, char* out, size_t n) {
+  out[0] = 0;
+  if (ts < 1700000000UL) return;
+  struct tm tm;
+  localTime(ts, tm);
+  int h12 = tm.tm_hour % 12 == 0 ? 12 : tm.tm_hour % 12;
+  snprintf(out, n, "%d:%02d %s", h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
+}
+
 static void buildThread() {
   if (!thrBox) return;
   lv_obj_clean(thrBox);
@@ -372,15 +382,18 @@ static void buildThread() {
   if (!c) return;
   for (int i = 0; i < c->count; i++) {
     const Msg* m = msgs_at(curConv, i);
+
+    // one row per message: the bubble, then a small line with the time and delivery state
     lv_obj_t* row = lv_obj_create(thrBox);
     lv_obj_set_width(row, lv_pct(100));
     lv_obj_set_height(row, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_row(row, 2, 0);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, m->out ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
     lv_obj_t* b = lv_obj_create(row);
     lv_obj_set_width(b, LV_SIZE_CONTENT);
@@ -392,9 +405,7 @@ static void buildThread() {
     lv_obj_set_style_radius(b, 14, 0);
     lv_obj_set_style_pad_hor(b, 10, 0);
     lv_obj_set_style_pad_ver(b, 6, 0);
-    lv_obj_set_style_pad_row(b, 2, 0);
     lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
 
     char shown[200];
     emoji_filter(m->text, shown, sizeof(shown), true);
@@ -404,14 +415,26 @@ static void buildThread() {
     lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
     lv_obj_update_layout(t);
     if (lv_obj_get_width(t) > 214) lv_obj_set_width(t, 214);
-    if (m->out) {
-      const char* st = m->status == MS_DELIVERED ? LV_SYMBOL_OK LV_SYMBOL_OK
-                     : m->status == MS_SENT ? LV_SYMBOL_OK
-                     : m->status == MS_FAILED ? LV_SYMBOL_WARNING " not delivered"
-                     : "sending...";
-      lv_obj_t* s = label(b, st, &font_tdos_12, 0x06101F);
-      lv_obj_set_style_align(s, LV_ALIGN_RIGHT_MID, 0);
+
+    char when[16], meta[64];
+    formatClock(m->ts, when, sizeof(when));
+    uint32_t metaCol = MUTE;
+    if (!m->out) {
+      snprintf(meta, sizeof(meta), "%s", when);
+    } else if (m->status == MS_DELIVERED) {
+      char rtt[16] = "";
+      if (m->rtt100) snprintf(rtt, sizeof(rtt), " %.1fs", m->rtt100 / 10.0f);
+      snprintf(meta, sizeof(meta), "%s  " LV_SYMBOL_OK LV_SYMBOL_OK "%s", when, rtt);
+      metaCol = GOOD;
+    } else if (m->status == MS_SENT) {
+      snprintf(meta, sizeof(meta), "%s  " LV_SYMBOL_OK, when);
+    } else if (m->status == MS_FAILED) {
+      snprintf(meta, sizeof(meta), "%s  " LV_SYMBOL_WARNING " not delivered", when);
+      metaCol = BAD;
+    } else {
+      snprintf(meta, sizeof(meta), "%s  sending...", when);
     }
+    if (meta[0]) label(row, meta, &font_tdos_12, metaCol);
   }
   lv_obj_update_layout(thrBox);
   lv_obj_scroll_to_y(thrBox, LV_COORD_MAX, LV_ANIM_OFF);

@@ -11,6 +11,7 @@ struct Msg {
   uint32_t ts;       // unix seconds, our clock when it was stored
   uint8_t status;    // MsgStatus
   bool out;
+  uint16_t rtt100;   // delivery round trip in 100 ms units; 0 = unknown
   char text[164];
 };
 
@@ -36,7 +37,7 @@ int msgs_ensure(const uint8_t key[4], const char* name, bool channel);
 const Conv* msgs_conv(int idx);
 const Msg* msgs_at(int conv, int i);                                  // i = 0 is the oldest
 uint32_t msgs_add(int conv, bool out, const char* text, uint32_t ts, uint8_t status);   // returns the id
-void msgs_set_status(int conv, uint32_t id, uint8_t status);
+void msgs_set_status(int conv, uint32_t id, uint8_t status, uint16_t rtt100 = 0);
 void msgs_mark_read(int conv);
 void msgs_set_open(int conv);                                         // the conversation on screen, or -1
 int msgs_unread_total();
@@ -47,10 +48,10 @@ uint32_t msgs_version();
 // registers a sink and is told about every new message and every status change.
 struct MsgSink {
   void (*onAdd)(const uint8_t key[4], const Msg& m);
-  void (*onStatus)(const uint8_t key[4], uint32_t id, uint8_t status);
+  void (*onStatus)(const uint8_t key[4], uint32_t id, uint8_t status, uint16_t rtt100);
 };
 void msgs_set_sink(const MsgSink* sink);
 // Insert a message read back from storage: keeps its id, is never unread, and is not re-saved.
 uint32_t msgs_add_loaded(int conv, uint32_t id, bool out, const char* text, uint32_t ts, uint8_t status);
-void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status);   // same, for a status record
+void msgs_set_status_loaded(int conv, uint32_t id, uint8_t status, uint16_t rtt100 = 0);   // same, for a status record
                                               // changes whenever anything does

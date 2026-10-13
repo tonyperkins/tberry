@@ -2,65 +2,86 @@
 #include "fonts/fonts.h"
 #include <Arduino.h>
 #include <SD.h>
+#include <esp_heap_caps.h>
 
 static bool packPresent = false;
 static lv_font_t* font14 = nullptr;
 static lv_font_t* font12 = nullptr;
-static constexpr int EMOJI_PX = 18;
 
-// ── LVGL file system driver ('S:' = the SD card) ─────────────────
+// ── In-memory cache of emoji files ───────────────────────────────
+// Finding one file in a folder of 1400+ entries means a linear scan of the FAT directory, which is
+// tens of milliseconds, and LVGL asks for the same image several times per redraw. So every emoji
+// is read from the card once, kept in PSRAM, and served from memory after that. Negative results
+// are remembered too, so a missing emoji costs one lookup ever.
+struct Entry { uint32_t cp; uint8_t* data; uint16_t len; };
+static constexpr int CACHE_N = 384;
+static Entry cache[CACHE_N];
+static int cacheCount = 0;
+
+static Entry* lookup(uint32_t cp) {
+  for (int i = 0; i < cacheCount; i++)
+    if (cache[i].cp == cp) return cache[i].data ? &cache[i] : nullptr;
+  if (cacheCount >= CACHE_N) return nullptr;       // full: further new emoji are left out
+  Entry& e = cache[cacheCount++];
+  e.cp = cp; e.data = nullptr; e.len = 0;
+  char path[40];
+  snprintf(path, sizeof(path), "/emoji/%x.bin", (unsigned)cp);
+  File f = SD.open(path, FILE_READ);
+  if (f) {
+    size_t n = f.size();
+    if (n > 0 && n <= 2048) {
+      e.data = (uint8_t*)heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+      if (!e.data) e.data = (uint8_t*)malloc(n);
+      if (e.data && f.read(e.data, n) == n) e.len = (uint16_t)n;
+      else { free(e.data); e.data = nullptr; }
+    }
+    f.close();
+  }
+  return e.data ? &e : nullptr;
+}
+
+// ── LVGL file system driver ('S:' = the emoji cache) ─────────────
+struct MemFile { const uint8_t* data; uint32_t len, pos; };
+
 static void* fsOpen(lv_fs_drv_t*, const char* path, lv_fs_mode_t mode) {
-  if (mode != LV_FS_MODE_RD) return nullptr;
-  char full[96];
-  snprintf(full, sizeof(full), "%s%s", path[0] == '/' ? "" : "/", path);
-  File* f = new File(SD.open(full, FILE_READ));
-  if (!f || !*f) { delete f; return nullptr; }
-  return f;
+  if (mode != LV_FS_MODE_RD || !packPresent) return nullptr;
+  const char* base = strrchr(path, '/');
+  unsigned cp = 0;
+  if (!base || sscanf(base + 1, "%x", &cp) != 1) return nullptr;
+  Entry* e = lookup(cp);
+  if (!e) return nullptr;
+  return new MemFile{ e->data, e->len, 0 };
 }
 static lv_fs_res_t fsClose(lv_fs_drv_t*, void* fp) {
-  File* f = (File*)fp;
-  f->close();
-  delete f;
+  delete (MemFile*)fp;
   return LV_FS_RES_OK;
 }
 static lv_fs_res_t fsRead(lv_fs_drv_t*, void* fp, void* buf, uint32_t btr, uint32_t* br) {
-  *br = ((File*)fp)->read((uint8_t*)buf, btr);
+  MemFile* f = (MemFile*)fp;
+  uint32_t n = f->pos >= f->len ? 0 : min<uint32_t>(btr, f->len - f->pos);
+  memcpy(buf, f->data + f->pos, n);
+  f->pos += n;
+  *br = n;
   return LV_FS_RES_OK;
 }
 static lv_fs_res_t fsSeek(lv_fs_drv_t*, void* fp, uint32_t pos, lv_fs_whence_t whence) {
-  SeekMode m = whence == LV_FS_SEEK_SET ? SeekSet : whence == LV_FS_SEEK_CUR ? SeekCur : SeekEnd;
-  return ((File*)fp)->seek(pos, m) ? LV_FS_RES_OK : LV_FS_RES_UNKNOWN;
+  MemFile* f = (MemFile*)fp;
+  int64_t np = whence == LV_FS_SEEK_SET ? (int64_t)pos : whence == LV_FS_SEEK_CUR ? (int64_t)f->pos + pos : (int64_t)f->len + pos;
+  if (np < 0 || np > f->len) return LV_FS_RES_UNKNOWN;
+  f->pos = (uint32_t)np;
+  return LV_FS_RES_OK;
 }
 static lv_fs_res_t fsTell(lv_fs_drv_t*, void* fp, uint32_t* pos) {
-  *pos = ((File*)fp)->position();
+  *pos = ((MemFile*)fp)->pos;
   return LV_FS_RES_OK;
 }
 
-// ── which code points we treat as emoji, and whether their file exists ──
+// ── which code points we treat as emoji ──────────────────────────
 static bool isEmojiRange(uint32_t cp) {
   return (cp >= 0x1F000 && cp <= 0x1FFFF) || (cp >= 0x2190 && cp <= 0x2BFF);
 }
-static int cacheIndex(uint32_t cp) {
-  if (cp >= 0x1F000 && cp <= 0x1FFFF) return cp - 0x1F000;                      // 4096 entries
-  if (cp >= 0x2190 && cp <= 0x2BFF) return 4096 + (cp - 0x2190);                // 2672 entries
-  return -1;
-}
-// 2 bits per code point: 0 unknown, 1 present, 2 missing
-static uint8_t seen[(4096 + 2672 + 3) / 4];
-
 static bool hasImage(uint32_t cp) {
-  int i = cacheIndex(cp);
-  if (i < 0 || !packPresent) return false;
-  uint8_t& b = seen[i / 4];
-  int sh = (i % 4) * 2;
-  int st = (b >> sh) & 3;
-  if (st == 0) {
-    char path[40];
-    snprintf(path, sizeof(path), "/emoji/%x.bin", (unsigned)cp);
-    st = SD.exists(path) ? 1 : 2;
-    b = (b & ~(3 << sh)) | (st << sh);
-  }
-  return st == 1;
+  return packPresent && isEmojiRange(cp) && lookup(cp) != nullptr;
 }
 
 static bool pathCb(const lv_font_t*, void* img_src, uint16_t len, uint32_t unicode, uint32_t) {
@@ -80,15 +101,25 @@ void emoji_init() {
   drv.tell_cb = fsTell;
   lv_fs_drv_register(&drv);
 
-  memset(seen, 0, sizeof(seen));
+  cacheCount = 0;
   packPresent = SD.exists("/emoji");
   if (!packPresent) return;
 
   // Image fonts: emoji come from files, everything else falls through to the text font.
-  font14 = lv_imgfont_create(EMOJI_PX, pathCb);
-  if (font14) font14->fallback = &font_tdos_14;
-  font12 = lv_imgfont_create(EMOJI_PX - 2, pathCb);
-  if (font12) font12->fallback = &font_tdos_12;
+  // The label takes its line height and baseline from the font it is given, so the image font
+  // copies them from the text font: images then sit on the same baseline as the letters.
+  font14 = lv_imgfont_create(font_tdos_14.line_height, pathCb);
+  if (font14) {
+    font14->fallback = &font_tdos_14;
+    font14->base_line = font_tdos_14.base_line;
+    font14->line_height = font_tdos_14.line_height;
+  }
+  font12 = lv_imgfont_create(font_tdos_12.line_height, pathCb);
+  if (font12) {
+    font12->fallback = &font_tdos_12;
+    font12->base_line = font_tdos_12.base_line;
+    font12->line_height = font_tdos_12.line_height;
+  }
 }
 
 bool emoji_pack_present() { return packPresent; }
