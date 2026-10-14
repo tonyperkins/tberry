@@ -52,6 +52,27 @@ const NodeInfo* nodes_sorted(int rank) {
 
 uint32_t nodes_version() { return version; }
 
+const NodeInfo* nodes_find(const uint8_t key4[4]) {
+  for (int i = 0; i < count; i++) if (memcmp(table[i].key, key4, 4) == 0) return &table[i];
+  return nullptr;
+}
+
+double nodes_distance_km(int32_t laE6, int32_t loE6, int32_t lbE6, int32_t lobE6, const char** dir) {
+  const double R = 6371.0, D2R = 0.017453292519943295;
+  double la1 = laE6 / 1e6 * D2R, lo1 = loE6 / 1e6 * D2R, la2 = lbE6 / 1e6 * D2R, lo2 = lobE6 / 1e6 * D2R;
+  double dla = la2 - la1, dlo = lo2 - lo1;
+  double a = sin(dla / 2) * sin(dla / 2) + cos(la1) * cos(la2) * sin(dlo / 2) * sin(dlo / 2);
+  double d = 2 * R * asin(sqrt(a));
+  if (dir) {
+    double y = sin(dlo) * cos(la2), x = cos(la1) * sin(la2) - sin(la1) * cos(la2) * cos(dlo);
+    double brg = atan2(y, x) / D2R;
+    if (brg < 0) brg += 360;
+    static const char* const pts[8] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+    *dir = pts[(int)((brg + 22.5) / 45.0) % 8];
+  }
+  return d;
+}
+
 bool nodes_position_for_name(const char* name, int32_t* latE6, int32_t* lonE6) {
   if (!name || !name[0]) return false;
   const NodeInfo* best = nullptr;

@@ -81,7 +81,7 @@ static void gt911Clear() {
 }
 
 // ── state ────────────────────────────────────────────────────────
-enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL, M_SETUP, M_UPDATE, M_WIFI };
+enum Mode { M_LOCK, M_HOME, M_APP, M_DBG, M_CONVS, M_THREAD, M_SETTINGS, M_ENTRY, M_PIN, M_ADV, M_PICK, M_BRIGHT, M_SIGNAL, M_NODES, M_STATUS, M_MAP, M_DETAIL, M_SETUP, M_UPDATE, M_WIFI, M_NODE };
 static Mode mode = M_LOCK;
 static uint32_t lastActivityMs = 0;
 static bool touchHeld = false;          // a touch that woke the device is ignored until released
@@ -244,6 +244,7 @@ static void showHome();
 static void openApp(int i);
 static void openWifiScan();
 static void openUpdate();
+static void openNodeDetail(const uint8_t key4[4]);
 static void netScreenTick();
 static void openSetup(int step);
 static void openMap();
@@ -290,6 +291,7 @@ static void rememberPlace() {
       break;
     case M_DETAIL: resumeMode = M_THREAD; resumeConv = detailConv; break;
     case M_CONVS: case M_SIGNAL: case M_NODES: case M_STATUS: case M_SETTINGS: resumeMode = mode; break;
+    case M_NODE: resumeMode = M_NODES; break;
     case M_MAP: if (mapReturnConv < 0) resumeMode = M_MAP; break;
     case M_ENTRY: case M_PICK: case M_BRIGHT: case M_ADV: case M_PIN: resumeMode = M_SETTINGS; break;
     default: break;                                    // Home, console, placeholders
@@ -381,6 +383,7 @@ static void goBack() {
   if (mode == M_THREAD) { openConvs(); return; }
   if (mode == M_DETAIL) { int c = detailConv; detailConv = -1; openThread(c); return; }
   if (mode == M_UPDATE || mode == M_WIFI) { updater_stop(); openSettings(); return; }
+  if (mode == M_NODE) { openNodes(); return; }
   if (mode == M_PICK && returnTo == M_SETUP) { openSetup(2); return; }
   if (mode == M_SETUP) return;                         // the setup has its own Back button
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
@@ -2055,21 +2058,45 @@ static void formatAge(uint32_t ts, char* out, size_t n) {
   else snprintf(out, n, "%ud", (unsigned)(d / 86400));
 }
 
+// ── Nodes: the list, with filters, and a detail sheet per node ───
+static int nodeFilter = 0;                      // 0 all, 1 people, 2 repeaters, 3 nearby
+static uint8_t nodeRowKey[MAX_NODES][4];
+static lv_obj_t* nodeChips[4];
+static const char* const FILTER_NAMES[4] = { "All", "People", "Repeaters", "Nearby" };
+
+static bool nodePasses(const NodeInfo* n) {
+  switch (nodeFilter) {
+    case 1: return n->type == 1;
+    case 2: return n->type == 2;
+    case 3: return n->hops >= 0 && n->hops <= 2;          // heard directly or through up to two repeaters
+    default: return true;
+  }
+}
+
+static void nodeRowCb(lv_event_t* e) {
+  int idx = (int)(intptr_t)lv_event_get_user_data(e);
+  if (idx >= 0 && idx < MAX_NODES) openNodeDetail(nodeRowKey[idx]);
+}
+
 static void fillNodes() {
   if (!nodesBox) return;
   int keep = lv_obj_get_scroll_y(nodesBox);
   lv_obj_clean(nodesBox);
-  int n = nodes_count();
-  if (n == 0) {
-    lv_obj_t* t = label(nodesBox, "Nobody heard yet.\nNodes appear as they advertise.", &font_tdos_14, MUTE);
-    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(t, LV_ALIGN_CENTER, 0, 10);
-    return;
+  for (int f = 0; f < 4; f++) {
+    if (!nodeChips[f]) continue;
+    lv_obj_set_style_bg_color(nodeChips[f], C(f == nodeFilter ? ACCENT : RAISE2), 0);
+    lv_obj_set_style_text_color(lv_obj_get_child(nodeChips[f], 0), C(f == nodeFilter ? INK : TEXT), 0);
   }
-  for (int r = 0; r < n; r++) {
+  int n = nodes_count();
+  int shown = 0;
+  for (int r = 0; r < n && shown < MAX_NODES; r++) {
     const NodeInfo* ni = nodes_sorted(r);
-    lv_obj_t* row = box(nodesBox, 312, 46, RAISE, 12);
-    lv_obj_set_pos(row, 4, r * 50);
+    if (!nodePasses(ni)) continue;
+    memcpy(nodeRowKey[shown], ni->key, 4);
+    lv_obj_t* row = tappable(box(nodesBox, 312, 46, RAISE, 12));
+    lv_obj_set_pos(row, 4, shown * 50);
+    lv_obj_add_event_cb(row, nodeRowCb, LV_EVENT_CLICKED, (void*)(intptr_t)shown);
+    shown++;
     lv_obj_t* av = box(row, 30, 30, typeColor(ni->type, ni->name), 15);
     lv_obj_set_pos(av, 8, 8);
     char ini[2] = { ni->type == 2 ? 'R' : ni->type == 3 ? 'S' : (char)toupper((unsigned char)ni->name[0]), 0 };
@@ -2097,16 +2124,34 @@ static void fillNodes() {
     lv_obj_set_style_text_align(rt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(rt, LV_ALIGN_RIGHT_MID, -10, 0);
   }
+  if (shown == 0) {
+    lv_obj_t* t = label(nodesBox, n == 0 ? "Nobody heard yet.\nNodes appear as they advertise." : "Nobody matches this filter.", &font_tdos_14, MUTE);
+    lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(t, LV_ALIGN_CENTER, 0, 10);
+  }
   lv_obj_scroll_to_y(nodesBox, keep, LV_ANIM_OFF);
+}
+
+static void nodeChipCb(lv_event_t* e) {
+  nodeFilter = (int)(intptr_t)lv_event_get_user_data(e);
+  fillNodes();
+  if (nodesBox) lv_obj_scroll_to_y(nodesBox, 0, LV_ANIM_OFF);
 }
 
 static void openNodes() {
   mode = M_NODES;
   lv_obj_t* s = newScreen();
   headerFor(s, "Nodes");
+  for (int f = 0; f < 4; f++) {                    // filter chips under the header
+    lv_obj_t* c = tappable(box(s, 74, 26, RAISE2, 13));
+    lv_obj_set_pos(c, 4 + f * 78, 60);
+    lv_obj_center(label(c, FILTER_NAMES[f], &font_tdos_12, TEXT));
+    lv_obj_add_event_cb(c, nodeChipCb, LV_EVENT_CLICKED, (void*)(intptr_t)f);
+    nodeChips[f] = c;
+  }
   nodesBox = lv_obj_create(s);
-  lv_obj_set_size(nodesBox, 320, 240 - 58);
-  lv_obj_set_pos(nodesBox, 0, 58);
+  lv_obj_set_size(nodesBox, 320, 240 - 92);
+  lv_obj_set_pos(nodesBox, 0, 92);
   lv_obj_set_style_bg_opa(nodesBox, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(nodesBox, 0, 0);
   lv_obj_set_style_pad_all(nodesBox, 0, 0);
@@ -2114,6 +2159,87 @@ static void openNodes() {
   fillNodes();
   nodesShownVersion = nodes_version();
   nodesBuiltMs = millis();
+  loadApp(s);
+}
+
+// Detail sheet for one node, with the three things you usually want next.
+static uint8_t detailNodeKey[4];
+
+static void nodeMessageCb(lv_event_t*) {
+  const NodeInfo* n = nodes_find(detailNodeKey);
+  if (!n) return;
+  if (n->type != 1) { toast("Only people can be messaged"); return; }
+  int conv = msgs_find(n->key);
+  if (conv < 0) conv = msgs_ensure(n->key, n->name, false);
+  if (conv >= 0) openThread(conv);
+}
+static void nodeMapCb(lv_event_t*) {
+  const NodeInfo* n = nodes_find(detailNodeKey);
+  if (!n) return;
+  if (!n->lat && !n->lon) { toast("No position shared"); return; }
+  openMapFocus(n->lat / 1e6, n->lon / 1e6, n->name);
+}
+static void nodeTestCb(lv_event_t*) {
+  const NodeInfo* n = nodes_find(detailNodeKey);
+  if (!n) return;
+  if (n->type != 1) { toast("Only people can be tested"); return; }
+  int conv = msgs_find(n->key);
+  if (conv < 0) conv = msgs_ensure(n->key, n->name, false);
+  if (conv < 0) return;
+  sigConv = conv;
+  openSignal();
+}
+
+static void openNodeDetail(const uint8_t key4[4]) {
+  const NodeInfo* n = nodes_find(key4);
+  if (!n) return;
+  memcpy(detailNodeKey, key4, 4);
+  mode = M_NODE;
+  lv_obj_t* s = newScreen();
+  char nm[48];
+  emoji_filter(n->name, nm, sizeof(nm), true);
+  headerFor(s, "Node");
+  lv_obj_t* name = label(s, nm[0] ? nm : "(unnamed)", emoji_font(&font_tdos_20), TEXT);
+  lv_obj_set_pos(name, 16, 62);
+  lv_obj_set_width(name, 288);
+  lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+
+  char b[200], age[12], hop[24], dist[48];
+  formatAge(n->lastTs, age, sizeof(age));
+  if (n->hops < 0) snprintf(hop, sizeof(hop), "path unknown");
+  else if (n->hops == 0) snprintf(hop, sizeof(hop), "direct");
+  else snprintf(hop, sizeof(hop), "%d hop%s", n->hops, n->hops == 1 ? "" : "s");
+  if ((n->lat || n->lon) && stLast.hasPos) {
+    const char* dir = "";
+    double km = nodes_distance_km(stLast.latE6, stLast.lonE6, n->lat, n->lon, &dir);
+    if (km < 1.0) snprintf(dist, sizeof(dist), "%d m %s of you", (int)(km * 1000), dir);
+    else snprintf(dist, sizeof(dist), "%.1f km %s of you", km, dir);
+  } else if (n->lat || n->lon) {
+    snprintf(dist, sizeof(dist), "Position shared (no GPS fix here)");
+  } else {
+    snprintf(dist, sizeof(dist), "No position shared");
+  }
+  char sig[40] = "";
+  if (n->rssi) snprintf(sig, sizeof(sig), "\nSignal %d dBm, SNR %.1f dB", n->rssi, n->snr4 / 4.0f);
+  char heard[32];
+  if (strcmp(age, "-") == 0) snprintf(heard, sizeof(heard), "Not heard since restart");
+  else if (strcmp(age, "now") == 0) snprintf(heard, sizeof(heard), "Heard just now");
+  else snprintf(heard, sizeof(heard), "Heard %s ago", age);
+  snprintf(b, sizeof(b), "%s, %s\n%s%s\n%s\nKey %02x%02x%02x%02x", typeName(n->type), hop,
+           heard, sig, dist, n->key[0], n->key[1], n->key[2], n->key[3]);
+  lv_obj_t* info = label(s, b, &font_tdos_14, MUTE);
+  lv_obj_set_width(info, 288);
+  lv_obj_set_pos(info, 16, 94);
+
+  bool person = n->type == 1, pos = n->lat || n->lon;
+  struct Btn { const char* text; bool ok; lv_event_cb_t cb; } btns[3] = {
+    { "Message", person, nodeMessageCb }, { "Map", pos, nodeMapCb }, { "Range test", person, nodeTestCb } };
+  for (int i = 0; i < 3; i++) {
+    lv_obj_t* bt = tappable(box(s, 96, 40, btns[i].ok ? ACCENT : RAISE2, 14));
+    lv_obj_set_pos(bt, 8 + i * 104, 194);
+    lv_obj_center(label(bt, btns[i].text, &font_tdos_14, btns[i].ok ? INK : MUTE));
+    lv_obj_add_event_cb(bt, btns[i].cb, LV_EVENT_CLICKED, nullptr);
+  }
   loadApp(s);
 }
 
@@ -2982,6 +3108,10 @@ void ui_nav(int dx, int dy) {
     lv_obj_scroll_by(listBox, 0, -dy * 38, LV_ANIM_OFF);
   } else if (mode == M_NODES && dy && nodesBox) {
     lv_obj_scroll_by(nodesBox, 0, -dy * 50, LV_ANIM_OFF);
+  } else if (mode == M_NODES && dx && nodesBox) {
+    nodeFilter = constrain(nodeFilter + dx, 0, 3);          // sideways: the next or previous filter
+    fillNodes();
+    lv_obj_scroll_to_y(nodesBox, 0, LV_ANIM_OFF);
   } else if (mode == M_BRIGHT && dx && brightSlider) {
     int v = constrain(lv_slider_get_value(brightSlider) + dx, levelKind == 0 ? 1 : 0, levelKind == 0 ? 16 : 10);
     lv_slider_set_value(brightSlider, v, LV_ANIM_OFF);
@@ -3056,7 +3186,7 @@ void ui_key(char c) {
     if (c == 8 || c == 127) { if (pinLen == 0) goBack(); else ui_pin_key(9); return; }
     return;
   }
-  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS || mode == M_DETAIL || mode == M_UPDATE || mode == M_WIFI) && (c == 8 || c == 127)) { goBack(); return; }
+  if ((mode == M_APP || mode == M_CONVS || mode == M_DBG || mode == M_SETTINGS || mode == M_ADV || mode == M_PICK || mode == M_BRIGHT || mode == M_SIGNAL || mode == M_NODES || mode == M_STATUS || mode == M_DETAIL || mode == M_UPDATE || mode == M_WIFI || mode == M_NODE) && (c == 8 || c == 127)) { goBack(); return; }
 }
 
 bool ui_console_active() { return mode == M_DBG; }

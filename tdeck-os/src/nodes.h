@@ -21,6 +21,10 @@ void nodes_seen(const uint8_t* key4, const char* name, uint8_t type, uint32_t ts
 int nodes_count();
 const NodeInfo* nodes_sorted(int rank);     // rank 0 = heard most recently
 uint32_t nodes_version();
+const NodeInfo* nodes_find(const uint8_t key4[4]);                  // by key, or nullptr
+// Great-circle distance in km between two positions (micro-degrees), and the compass point of the
+// bearing from the first to the second ("N", "NE", ...).
+double nodes_distance_km(int32_t laE6, int32_t loE6, int32_t lbE6, int32_t lobE6, const char** dir);
 
 // Where a node says it is (from its adverts). Returns false if unknown. Names are compared exactly,
 // as transmitted; if several nodes share a name the most recently heard one wins.
