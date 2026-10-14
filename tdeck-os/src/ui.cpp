@@ -250,7 +250,7 @@ static void openSetup(int step);
 static void openMap();
 static void openMapFocus(double lat, double lon, const char* name);
 static void openMessageDetails(int conv, int idx);
-static void openNodes();
+static void openNodes(bool keepFilter = false);
 static void openStatus();
 static void openConvs();
 static void openThread(int conv);
@@ -383,7 +383,7 @@ static void goBack() {
   if (mode == M_THREAD) { openConvs(); return; }
   if (mode == M_DETAIL) { int c = detailConv; detailConv = -1; openThread(c); return; }
   if (mode == M_UPDATE || mode == M_WIFI) { updater_stop(); openSettings(); return; }
-  if (mode == M_NODE) { openNodes(); return; }
+  if (mode == M_NODE) { openNodes(true); return; }
   if (mode == M_PICK && returnTo == M_SETUP) { openSetup(2); return; }
   if (mode == M_SETUP) return;                         // the setup has its own Back button
   if (mode == M_PICK || mode == M_ENTRY || mode == M_BRIGHT) {
@@ -2064,7 +2064,25 @@ static uint8_t nodeRowKey[MAX_NODES][4];
 static lv_obj_t* nodeChips[4];
 static const char* const FILTER_NAMES[4] = { "All", "People", "Repeaters", "Nearby" };
 
+static char nodeQuery[24];                     // typed on the keyboard; matches names and key prefixes
+static lv_obj_t *nodeSearchLbl, *nodeSearchClear;
+
+static bool containsCI(const char* hay, const char* needle) {
+  size_t n = strlen(needle);
+  for (; *hay; hay++) {
+    size_t i = 0;
+    while (i < n && hay[i] && tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i])) i++;
+    if (i == n) return true;
+  }
+  return n == 0;
+}
+
 static bool nodePasses(const NodeInfo* n) {
+  if (nodeQuery[0]) {
+    char hex[9];
+    snprintf(hex, sizeof(hex), "%02x%02x%02x%02x", n->key[0], n->key[1], n->key[2], n->key[3]);
+    if (!containsCI(n->name, nodeQuery) && !containsCI(hex, nodeQuery)) return false;
+  }
   switch (nodeFilter) {
     case 1: return n->type == 1;
     case 2: return n->type == 2;
@@ -2132,16 +2150,43 @@ static void fillNodes() {
   lv_obj_scroll_to_y(nodesBox, keep, LV_ANIM_OFF);
 }
 
+static void nodeSearchRefresh() {
+  if (!nodeSearchLbl) return;
+  if (nodeQuery[0]) {
+    lv_label_set_text(nodeSearchLbl, nodeQuery);
+    lv_obj_set_style_text_color(nodeSearchLbl, C(TEXT), 0);
+    lv_obj_clear_flag(nodeSearchClear, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_label_set_text(nodeSearchLbl, "Type to search");
+    lv_obj_set_style_text_color(nodeSearchLbl, C(MUTE), 0);
+    lv_obj_add_flag(nodeSearchClear, LV_OBJ_FLAG_HIDDEN);
+  }
+  fillNodes();
+  if (nodesBox) lv_obj_scroll_to_y(nodesBox, 0, LV_ANIM_OFF);
+}
+static void nodeSearchClearCb(lv_event_t*) { nodeQuery[0] = 0; nodeSearchRefresh(); }
+
 static void nodeChipCb(lv_event_t* e) {
   nodeFilter = (int)(intptr_t)lv_event_get_user_data(e);
   fillNodes();
   if (nodesBox) lv_obj_scroll_to_y(nodesBox, 0, LV_ANIM_OFF);
 }
 
-static void openNodes() {
+static void openNodes(bool keepFilter) {
   mode = M_NODES;
+  if (!keepFilter) { nodeFilter = 0; nodeQuery[0] = 0; }      // a fresh visit starts from the full list
   lv_obj_t* s = newScreen();
   headerFor(s, "Nodes");
+  lv_obj_t* sb = box(s, 190, 28, RAISE, 10);                  // search box in the header row
+  lv_obj_set_pos(sb, 124, 26);
+  nodeSearchLbl = label(sb, "", &font_tdos_14, MUTE);
+  lv_obj_align(nodeSearchLbl, LV_ALIGN_LEFT_MID, 10, 0);
+  lv_obj_set_width(nodeSearchLbl, 150);
+  lv_label_set_long_mode(nodeSearchLbl, LV_LABEL_LONG_CLIP);
+  nodeSearchClear = tappable(box(sb, 28, 28, RAISE, 10));
+  lv_obj_align(nodeSearchClear, LV_ALIGN_RIGHT_MID, 0, 0);
+  lv_obj_center(label(nodeSearchClear, LV_SYMBOL_CLOSE, &font_tdos_12, MUTE));
+  lv_obj_add_event_cb(nodeSearchClear, nodeSearchClearCb, LV_EVENT_CLICKED, nullptr);
   for (int f = 0; f < 4; f++) {                    // filter chips under the header
     lv_obj_t* c = tappable(box(s, 74, 26, RAISE2, 13));
     lv_obj_set_pos(c, 4 + f * 78, 60);
@@ -2156,7 +2201,7 @@ static void openNodes() {
   lv_obj_set_style_border_width(nodesBox, 0, 0);
   lv_obj_set_style_pad_all(nodesBox, 0, 0);
   lv_obj_set_scrollbar_mode(nodesBox, LV_SCROLLBAR_MODE_OFF);
-  fillNodes();
+  nodeSearchRefresh();                              // sets the box text and fills the list
   nodesShownVersion = nodes_version();
   nodesBuiltMs = millis();
   loadApp(s);
@@ -3157,6 +3202,20 @@ void ui_key(char c) {
       return;
     }
     if (c >= 32 && c < 127) lv_textarea_add_char(taInput, (uint32_t)c);
+    return;
+  }
+  if (mode == M_NODES) {
+    size_t n = strlen(nodeQuery);
+    if (c == 8 || c == 127) {                        // erase a letter; with nothing typed, go back
+      if (n) { nodeQuery[n - 1] = 0; nodeSearchRefresh(); } else goBack();
+    } else if (c == 27) {
+      nodeQuery[0] = 0;
+      nodeSearchRefresh();
+    } else if (c >= 32 && c < 127 && n < sizeof(nodeQuery) - 1) {
+      nodeQuery[n] = c;
+      nodeQuery[n + 1] = 0;
+      nodeSearchRefresh();
+    }
     return;
   }
   if (mode == M_MAP) {

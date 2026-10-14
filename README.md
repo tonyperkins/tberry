@@ -20,7 +20,8 @@ parameters, PIN-protected) still reachable.
   clock difference, airtime, how many copies were heard.
 - **Signal**: one-tap range test to a contact (round trip, hops, RSSI, SNR), logged to the SD card.
 - **Nodes**: everyone heard, with signal and age; filter by All, People, Repeaters or Nearby, and tap
-  a node for its details with Message, Map and Range test buttons.
+  a node for its details with Message, Map and Range test buttons. Typing on the keyboard searches
+  names and key prefixes.
 - **Map**: offline map from the SD card with your position, nodes that advertise one, and "show where
   this message came from".
 - **Status**: battery, uptime, packets, airtime, storage, health, and GPS detail (fix, satellites,

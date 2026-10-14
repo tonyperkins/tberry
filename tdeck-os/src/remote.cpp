@@ -145,7 +145,7 @@ void remote_poll() {
       txStage = 2; txPos = 0;
     } else if (txStage == 2) {
       size_t total = W * H * 2;
-      size_t n = min<size_t>(room, total - txPos);
+      size_t n = min<size_t>(min(room, 256), total - txPos);       // small writes: the USB serial driver stalls on big ones
       Serial.write((const uint8_t*)snap + txPos, n);
       txPos += n;
       if (txPos >= total) txStage = 3;
