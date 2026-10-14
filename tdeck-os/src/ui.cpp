@@ -3250,6 +3250,9 @@ void ui_key(char c) {
 
 bool ui_console_active() { return mode == M_DBG; }
 int ui_mode() { return (int)mode; }
+#ifdef TDOS_REMOTE
+void ui_debug_setup(int step) { openSetup(step); }
+#endif
 bool ui_screen_off() { return screenOff; }
 int ui_screen_state() { return mode != M_LOCK ? 0 : screenOff ? 2 : 1; }   // 0 on, 1 clock (dim), 2 off
 

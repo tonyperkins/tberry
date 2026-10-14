@@ -113,6 +113,7 @@ static void exec(char* s) {
   if (!strcmp(s, "long")) { ui_long(); busyUntil = millis() + 300; busy = true; return; }
   if (sscanf(s, "wait %d", &a) == 1) { busyUntil = millis() + a; busy = true; return; }
   if (!strcmp(s, "shot")) { startShot(); busy = true; return; }
+  if (sscanf(s, "setup %d", &a) == 1) { ui_debug_setup(a); busyUntil = millis() + 400; busy = true; return; }
   if (!strcmp(s, "crash")) { volatile int* p = nullptr; *p = 1; return; }       // test the crash record
   if (!strcmp(s, "hang")) { while (true) { delay(100); } }                       // test the watchdog (loop never returns)
   if (!strcmp(s, "info")) {

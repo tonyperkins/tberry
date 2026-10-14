@@ -11,6 +11,7 @@ Each COMMAND is one quoted string:
   "ball 1 0" / "click" / "long"   trackball step, click, long press (Home)
   "wait 500"               pause, milliseconds
   "info"                   prints mode, free LVGL memory, free heap, why the last start happened
+  "setup N"                open first-boot setup page N (0-3), for screenshots
   "crash" / "hang"         force a crash or a stuck loop, to test the crash record and watchdog
   "shot name.png"          screenshot to a PNG file
 
