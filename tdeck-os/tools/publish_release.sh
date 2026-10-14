@@ -3,6 +3,7 @@
 # include/version.h (raise TDOS_BUILD for every release, or devices will not install it).
 #
 #   tools/publish_release.sh "one-line release notes"
+#   DRY_RUN=1 tools/publish_release.sh   builds and signs into dist/release without publishing
 #
 # Needs: the signing key (tools/sign_release.py keygen), `gh` logged in, and a clean `pio` setup.
 # Devices fetch .../releases/latest/download/manifest.json, so the newest release is what they see.
@@ -30,6 +31,11 @@ mkdir -p "$OUT"
 cp .pio/build/tdeck/firmware.bin "$OUT/firmware.bin"
 URL="https://github.com/$REPO/releases/download/$TAG/firmware.bin"
 python3 tools/sign_release.py sign "$OUT/firmware.bin" --version "$VERSION" --build "$BUILD" --url "$URL" --out "$OUT/manifest.json"
+
+if [ -n "$DRY_RUN" ]; then
+  echo "dry run: built and signed $TAG (build $BUILD) in $OUT, nothing published"
+  exit 0
+fi
 
 echo "Publishing $TAG (build $BUILD) to $REPO"
 gh release create "$TAG" "$OUT/firmware.bin" "$OUT/manifest.json" --repo "$REPO" --title "tdeck-os $VERSION" --notes "$NOTES"
