@@ -3027,6 +3027,12 @@ void ui_tick() {
   uint32_t idleS = TIMEOUT_SECONDS[constrain((int)cfg().screenTimeout, 0, TIMEOUT_N - 1)];
   if (idleS && mode != M_LOCK && mode != M_UPDATE && millis() - lastActivityMs > idleS * 1000UL) goLock();
   if (mode == M_WIFI || mode == M_UPDATE) netScreenTick();
+  // Nobody is using the device while the clock is up: run the CPU slower. 80 MHz keeps the bus
+  // clock the peripherals use unchanged, so the radio, SD card, GPS and display are unaffected.
+  {
+    uint32_t want = (mode == M_LOCK) ? 80 : 240;
+    if (getCpuFrequencyMhz() != want) setCpuFrequencyMhz(want);
+  }
   uint32_t offS = SCREENOFF_SECONDS[constrain((int)cfg().screenOff, 0, SCREENOFF_N - 1)];
   if (mode == M_LOCK && !screenOff && offS && millis() - lockedAtMs > offS * 1000UL) {
     setBacklight(0);                                  // nobody is looking: the backlight is the biggest draw

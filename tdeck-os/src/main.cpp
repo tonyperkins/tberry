@@ -84,9 +84,9 @@ public:
   void begin() { startup_reason = BD_STARTUP_NORMAL; }   // skip ESP32Board::begin(): it starts Wire on the wrong pins
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
-    uint32_t raw = 0;
-    for (int i = 0; i < 8; i++) raw += analogRead(PIN_BATT);
-    return (uint16_t)((2.0f * 3.3f * 1000.0f * (raw / 8)) / 4096.0f);
+    uint32_t mv = 0;
+    for (int i = 0; i < 8; i++) mv += analogReadMilliVolts(PIN_BATT);   // uses the chip's factory calibration
+    return (uint16_t)(2 * (mv / 8));                                    // the board halves the battery voltage
   }
   const char* getManufacturerName() const override { return "LilyGo T-Deck"; }
 };
