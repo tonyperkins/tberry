@@ -1,6 +1,7 @@
 #include "mapview.h"
 #include "nodes.h"
 #include "fonts/fonts.h"
+#include "emoji.h"
 #include <Arduino.h>
 #include <SD.h>
 #include <PNGdec.h>
@@ -221,7 +222,9 @@ static void setMarker(int i, double lat, double lon, uint32_t colour, const char
   lv_obj_set_style_bg_color(markers[i].dot, lv_color_hex(colour), 0);
   lv_obj_set_pos(markers[i].dot, x - 5, VIEW_Y + y - 5);
   lv_obj_clear_flag(markers[i].dot, LV_OBJ_FLAG_HIDDEN);
-  lv_label_set_text(markers[i].name, name);
+  char shown[64];
+  emoji_filter(name, shown, sizeof(shown), true);
+  lv_label_set_text(markers[i].name, shown);
   lv_obj_set_pos(markers[i].name, x + 8, VIEW_Y + y - 8);
   lv_obj_clear_flag(markers[i].name, LV_OBJ_FLAG_HIDDEN);
 }
@@ -250,7 +253,9 @@ static void placeMarkers() {
       bool vis = x > -20 && x < VIEW_W + 20 && y > -20 && y < VIEW_H + 20;
       if (vis) {
         lv_obj_set_pos(focusRing, x - 12, VIEW_Y + y - 12);
-        lv_label_set_text(focusLbl, focusName);
+        char shown[96];
+        emoji_filter(focusName, shown, sizeof(shown), true);
+        lv_label_set_text(focusLbl, shown);
         lv_obj_set_pos(focusLbl, x + 14, VIEW_Y + y - 8);
         lv_obj_clear_flag(focusRing, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(focusLbl, LV_OBJ_FLAG_HIDDEN);
@@ -341,7 +346,7 @@ void mapview_create(lv_obj_t* parent) {
     lv_obj_add_flag(d, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t* n = lv_label_create(parent);
     lv_label_set_text(n, "");
-    lv_obj_set_style_text_font(n, &font_tdos_12, 0);
+    lv_obj_set_style_text_font(n, emoji_font(&font_tdos_12), 0);
     lv_obj_set_style_text_color(n, lv_color_hex(TEXT), 0);
     lv_obj_set_style_bg_color(n, lv_color_hex(INK), 0);
     lv_obj_set_style_bg_opa(n, LV_OPA_70, 0);
@@ -365,7 +370,7 @@ void mapview_create(lv_obj_t* parent) {
   lv_obj_add_flag(focusRing, LV_OBJ_FLAG_HIDDEN);
   focusLbl = lv_label_create(parent);
   lv_label_set_text(focusLbl, "");
-  lv_obj_set_style_text_font(focusLbl, &font_tdos_12, 0);
+  lv_obj_set_style_text_font(focusLbl, emoji_font(&font_tdos_12), 0);
   lv_obj_set_style_text_color(focusLbl, lv_color_hex(ACCENT), 0);
   lv_obj_set_style_bg_color(focusLbl, lv_color_hex(INK), 0);
   lv_obj_set_style_bg_opa(focusLbl, LV_OPA_80, 0);
