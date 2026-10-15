@@ -456,6 +456,7 @@ static void fillConvs() {
     return;
   }
   for (int r = 0; r < convN; r++) {
+    if (ui_lvgl_free() < 15000) break;                          // never run the pool dry (null object, crash)
     const Conv* c = msgs_conv(convOrder[r]);
     lv_obj_t* row = tappable(box(convBox, 312, 46, r == convSel ? RAISE2 : RAISE, 12));
     lv_obj_set_pos(row, 4, r * 50);
@@ -653,6 +654,16 @@ static void buildThread() {
   const Conv* c = msgs_conv(curConv);
   if (!c) return;
   int first = max(0, c->count - THREAD_WINDOW);
+  {
+    // A message is up to ~7 LVGL objects (row, sender, quote, bubble, text, time, state) plus its text
+    // copied into labels. 36 busy ones outran the 80 KB pool, so draw as many of the newest as fit.
+    int32_t budget = (int32_t)ui_lvgl_free() - 16000;           // keep a reserve for the rest of the UI
+    for (int i = c->count - 1; i >= first; i--) {
+      const Msg* mm = msgs_at(curConv, i);
+      budget -= 1800 + 2 * (int32_t)(mm ? strlen(mm->text) : 0);
+      if (budget < 0) { first = i + 1; break; }
+    }
+  }
 
   // Reactions first: each one is attached to the latest earlier message from the author it names,
   // which is how other apps resolve them (the 8 character code is not yet understood, TDOS-008).
@@ -681,6 +692,7 @@ static void buildThread() {
   }
 
   for (int i = first; i < c->count; i++) {
+    if (ui_lvgl_free() < 8000) break;                           // last resort: a short thread beats a crash
     const Msg* m = msgs_at(curConv, i);
 
     // A reaction (@[Author]<emoji> <code>) is not a bubble: one quiet line, without the code.
