@@ -2060,6 +2060,8 @@ static void formatAge(uint32_t ts, char* out, size_t n) {
 
 // ── Nodes: the list, with filters, and a detail sheet per node ───
 static int nodeFilter = 0;                      // 0 all, 1 people, 2 repeaters, 3 nearby
+static constexpr int NODE_PAGE = 20;            // rows built at a time: each row is ~6 LVGL objects, and 100 of them
+static int nodeLimit = NODE_PAGE;               // exhausted the 80 KB pool (null object, crash), so the rest is behind "Show more"
 static uint8_t nodeRowKey[MAX_NODES][4];
 static lv_obj_t* nodeChips[4];
 static const char* const FILTER_NAMES[4] = { "All", "People", "Repeaters", "Nearby" };
@@ -2096,6 +2098,9 @@ static void nodeRowCb(lv_event_t* e) {
   if (idx >= 0 && idx < MAX_NODES) openNodeDetail(nodeRowKey[idx]);
 }
 
+static void fillNodes();
+static void nodeMoreCb(lv_event_t*) { nodeLimit += NODE_PAGE; fillNodes(); }
+
 static void fillNodes() {
   if (!nodesBox) return;
   int keep = lv_obj_get_scroll_y(nodesBox);
@@ -2107,9 +2112,13 @@ static void fillNodes() {
   }
   int n = nodes_count();
   int shown = 0;
+  int matching = 0;
+  bool more = false;
   for (int r = 0; r < n && shown < MAX_NODES; r++) {
     const NodeInfo* ni = nodes_sorted(r);
     if (!nodePasses(ni)) continue;
+    matching++;
+    if (shown >= nodeLimit || ui_lvgl_free() < 20000) { more = true; continue; }   // keep a reserve for the rest of the UI
     memcpy(nodeRowKey[shown], ni->key, 4);
     lv_obj_t* row = tappable(box(nodesBox, 312, 46, RAISE, 12));
     lv_obj_set_pos(row, 4, shown * 50);
@@ -2142,6 +2151,14 @@ static void fillNodes() {
     lv_obj_set_style_text_align(rt, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(rt, LV_ALIGN_RIGHT_MID, -10, 0);
   }
+  if (more) {
+    char mb[32];
+    snprintf(mb, sizeof(mb), "Show more (%d left)", matching - shown);
+    lv_obj_t* mr = tappable(box(nodesBox, 312, 40, RAISE2, 12));
+    lv_obj_set_pos(mr, 4, shown * 50);
+    lv_obj_center(label(mr, mb, &font_tdos_14, ACCENT));
+    lv_obj_add_event_cb(mr, nodeMoreCb, LV_EVENT_CLICKED, nullptr);
+  }
   if (shown == 0) {
     lv_obj_t* t = label(nodesBox, n == 0 ? "Nobody heard yet.\nNodes appear as they advertise." : "Nobody matches this filter.", &font_tdos_14, MUTE);
     lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
@@ -2152,6 +2169,7 @@ static void fillNodes() {
 
 static void nodeSearchRefresh() {
   if (!nodeSearchLbl) return;
+  nodeLimit = NODE_PAGE;
   if (nodeQuery[0]) {
     lv_label_set_text(nodeSearchLbl, nodeQuery);
     lv_obj_set_style_text_color(nodeSearchLbl, C(TEXT), 0);
@@ -2168,6 +2186,7 @@ static void nodeSearchClearCb(lv_event_t*) { nodeQuery[0] = 0; nodeSearchRefresh
 
 static void nodeChipCb(lv_event_t* e) {
   nodeFilter = (int)(intptr_t)lv_event_get_user_data(e);
+  nodeLimit = NODE_PAGE;
   fillNodes();
   if (nodesBox) lv_obj_scroll_to_y(nodesBox, 0, LV_ANIM_OFF);
 }
@@ -3161,6 +3180,7 @@ void ui_nav(int dx, int dy) {
     lv_obj_scroll_by(nodesBox, 0, -dy * 50, LV_ANIM_OFF);
   } else if (mode == M_NODES && dx && nodesBox) {
     nodeFilter = constrain(nodeFilter + dx, 0, 3);          // sideways: the next or previous filter
+    nodeLimit = NODE_PAGE;
     fillNodes();
     lv_obj_scroll_to_y(nodesBox, 0, LV_ANIM_OFF);
   } else if (mode == M_BRIGHT && dx && brightSlider) {
