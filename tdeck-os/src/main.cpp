@@ -773,6 +773,21 @@ static void pollTrackball() {
   }
 }
 
+
+// Key backlight: lit only while the screen is fully on (not the clock, not screen-off). The keyboard
+// MCU takes command 0x01 with a brightness byte. Sent on change only, and retried if the I2C write fails.
+static void kbBacklightTick() {
+  static int sent = -1;
+  if (!kbOk) return;
+  static const uint8_t LEVEL[5] = { 0, 0x18, 0x40, 0x80, 0xFF };
+  int want = ui_screen_state() == 0 ? LEVEL[constrain((int)cfg().kbLight, 0, 4)] : 0;
+  if (want == sent) return;
+  Wire.beginTransmission(KB_ADDR);
+  Wire.write(0x01);
+  Wire.write((uint8_t)want);
+  if (Wire.endTransmission(true) == 0) sent = want;
+}
+
 static void buildModel(UiModel& m) {
   m.utc = rtc.getCurrentTime();
   m.clockValid = m.utc > 1700000000UL;
@@ -960,6 +975,7 @@ void loop() {
     }
   }
   ui_tick();
+  kbBacklightTick();
   if (now - lastLog >= 5000) {
     lastLog = now;
     logf("i2c: %s  lvgl free %lu\n", i2cFound, (unsigned long)ui_lvgl_free());

@@ -26,6 +26,7 @@ struct Settings {
   uint8_t screenTimeout;   // index into the timeout list in ui.cpp: 30 s, 1 min (default), 2, 5, 10 min, never
   char wifiSsid[33];       // network used for updates; empty = none saved
   char wifiPass[64];
+  uint8_t kbLight;         // key backlight level 0 (off) to 4; lit only while the screen is on
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults

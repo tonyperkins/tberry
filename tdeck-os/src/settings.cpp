@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 static constexpr uint32_t MAGIC = 0x53444F54;   // "TODS"
-static constexpr uint16_t VERSION = 9;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates
+static constexpr uint16_t VERSION = 10;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates, 9 -> 10: key backlight
 static constexpr const char* PATH = "/settings";
 
 static Settings s;
@@ -29,6 +29,7 @@ static void applyDefaults() {
   s.screenTimeout = 1;
   s.setupDone = 0;
   s.screenOff = 1;
+  s.kbLight = 2;
 }
 
 void settings_begin(fs::FS& fs) {
@@ -49,7 +50,8 @@ void settings_begin(fs::FS& fs) {
     else if (tmp.version == 5) { tmp.screenTimeout = s.screenTimeout; tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == 6) { tmp.setupDone = 1; tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == 7) { tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
-    else if (tmp.version == 8) { tmp.version = VERSION; s = tmp; }       // WiFi fields stay empty
+    else if (tmp.version == 8) { tmp.kbLight = s.kbLight; tmp.version = VERSION; s = tmp; }   // WiFi fields stay empty
+    else if (tmp.version == 9) { tmp.kbLight = s.kbLight; tmp.version = VERSION; s = tmp; }  // the new byte was padding: zero
     else if (tmp.version == VERSION) s = tmp;
   }
   f.close();

@@ -120,6 +120,7 @@ static char pinBuf[8], pinFirst[8];
 static int pinLen = 0, pinStage = 0;     // 0 enter, 1 choose, 2 confirm
 static bool resetArmed = false;
 static int lastBatt = 0;
+static bool lastCharging = false;
 static char lastName[32];
 static char lastStorage[32];
 static UiActions actions = {};
@@ -1799,7 +1800,8 @@ static void fillSettings() {
   addRow("Software update", TDOS_VERSION, ROW_UPDATE, K_NAV);
   int p = presetIndex();
   addRow("Radio", p >= 0 ? presets[p].name : "Custom", ROW_RADIO, K_INFO);
-  snprintf(b, sizeof(b), "%d%%", lastBatt);
+  if (lastCharging) snprintf(b, sizeof(b), "Charging");
+  else snprintf(b, sizeof(b), "%d%%", lastBatt);
   addRow("Battery", b, ROW_BATT, K_INFO);
   addRow("History", lastStorage, ROW_ABOUT, K_INFO);
 #ifdef TDOS_REMOTE
@@ -2461,7 +2463,8 @@ static void refreshStatus() {
   const UiModel& m = stLast;
   char b[48], c[48];
 
-  snprintf(b, sizeof(b), "%d%%", m.batteryPct);
+  if (m.charging) snprintf(b, sizeof(b), "Charging");
+  else snprintf(b, sizeof(b), "%d%%", m.batteryPct);
   snprintf(c, sizeof(c), "%.2f V%s", m.batteryMv / 1000.0f, m.charging ? ", charging" : "");
   lv_label_set_text(stVal[0], b); lv_label_set_text(stSub[0], c);
 
@@ -2629,6 +2632,10 @@ static void quickVolumeCb(lv_event_t* e) {
   settings_changed();
 }
 static void quickVolumeReleaseCb(lv_event_t*) { audio_play(SND_BLIP); }
+static void quickKeysCb(lv_event_t* e) {              // main.cpp applies cfg().kbLight whenever the screen is on
+  cfg().kbLight = (uint8_t)constrain(lv_slider_get_value(lv_event_get_target(e)), 0, 4);
+  settings_changed();
+}
 static void quickAdvertCb(lv_event_t*) {
   if (actions.advertise) actions.advertise();
   closeQuick();
@@ -2653,7 +2660,7 @@ static void openQuick() {
   lv_obj_set_pos(quickBackdrop, 0, 0);
   lv_obj_add_event_cb(quickBackdrop, quickBackdropCb, LV_EVENT_CLICKED, nullptr);
 
-  lv_obj_t* panel = box(quickBackdrop, 320, 156, RAISE, 0);
+  lv_obj_t* panel = box(quickBackdrop, 320, 182, RAISE, 0);
   lv_obj_set_pos(panel, 0, 22);
   lv_obj_t* title = label(panel, "Quick settings", &font_tdos_12, MUTE);
   lv_obj_set_pos(title, 12, 8);
@@ -2679,6 +2686,16 @@ static void openQuick() {
   lv_obj_add_event_cb(vs, quickVolumeCb, LV_EVENT_VALUE_CHANGED, nullptr);
   lv_obj_add_event_cb(vs, quickVolumeReleaseCb, LV_EVENT_RELEASED, nullptr);
 
+  lv_obj_t* kb = label(panel, LV_SYMBOL_KEYBOARD, &font_tdos_14, TEXT);
+  lv_obj_set_pos(kb, 12, 86);
+  lv_obj_t* ks = lv_slider_create(panel);
+  lv_obj_set_size(ks, 250, 14);
+  lv_obj_set_pos(ks, 46, 90);
+  lv_slider_set_range(ks, 0, 4);
+  lv_slider_set_value(ks, cfg().kbLight, LV_ANIM_OFF);
+  styleSlider(ks, 5);
+  lv_obj_add_event_cb(ks, quickKeysCb, LV_EVENT_VALUE_CHANGED, nullptr);
+
   struct Btn { const char* text; const char* sym; lv_event_cb_t cb; };
   const Btn btns[4] = {
     { "Advert", LV_SYMBOL_UPLOAD, quickAdvertCb },
@@ -2688,7 +2705,7 @@ static void openQuick() {
   };
   for (int i = 0; i < 4; i++) {
     lv_obj_t* b = tappable(box(panel, 74, 52, RAISE2, 14));
-    lv_obj_set_pos(b, 6 + i * 78, 92);
+    lv_obj_set_pos(b, 6 + i * 78, 118);
     bool isGps = (i == 2);
     uint32_t iconCol = isGps ? (cfg().gpsEnabled ? GOOD : 0x3A4658) : ACCENT;
     lv_obj_t* ic = label(b, btns[i].sym, &font_tdos_16, iconCol);
@@ -2703,7 +2720,7 @@ static void openQuick() {
   lv_anim_t a;
   lv_anim_init(&a);
   lv_anim_set_var(&a, panel);
-  lv_anim_set_values(&a, -156, 22);
+  lv_anim_set_values(&a, -182, 22);
   lv_anim_set_time(&a, 160);
   lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_y);
   lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
@@ -3091,7 +3108,8 @@ void ui_update(const UiModel& m) {
   }
 
   const char* batt = m.charging ? LV_SYMBOL_CHARGE : (m.batteryPct > 75 ? LV_SYMBOL_BATTERY_FULL : m.batteryPct > 50 ? LV_SYMBOL_BATTERY_3 : m.batteryPct > 25 ? LV_SYMBOL_BATTERY_2 : LV_SYMBOL_BATTERY_1);
-  snprintf(b, sizeof(b), "%s %d%%", batt, m.batteryPct);
+  if (m.charging) snprintf(b, sizeof(b), "%s Charging", batt);   // on USB the reading is the charger, not the cell
+  else snprintf(b, sizeof(b), "%s %d%%", batt, m.batteryPct);
   lv_label_set_text(barBatt, b);
   lv_obj_set_style_text_color(barBatt, C(m.batteryPct <= 15 ? BAD : TEXT), 0);
   lv_obj_set_style_text_color(barSig, C(m.signalBars >= 3 ? GOOD : m.signalBars >= 1 ? ACCENT : MUTE), 0);
@@ -3111,6 +3129,7 @@ void ui_update(const UiModel& m) {
   lv_label_set_text(lockMesh, b);
 
   lastBatt = m.batteryPct;
+  lastCharging = m.charging;
   strncpy(lastName, m.nodeName, sizeof(lastName) - 1);
   strncpy(lastStorage, m.storage, sizeof(lastStorage) - 1);
 
