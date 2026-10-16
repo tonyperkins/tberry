@@ -94,6 +94,7 @@ static lv_obj_t *bar, *barTime, *barSig, *barBatt;
 static lv_obj_t *lockTime, *lockDate, *lockMesh;
 static lv_obj_t *tiles[6], *badge, *badgeLbl;
 static lv_obj_t *dbgLabel, *convBox, *thrBox, *taInput;
+static lv_obj_t *inSend, *inEmoji, *inClear;       // buttons beside the message box
 static lv_obj_t *pickerObj, *pickerGrids[4], *pickerTabs[4];   // emoji picker over the thread
 static int pickerTab = 0;
 static lv_group_t* inputGroup = nullptr;   // gives the message box the focus state that shows its cursor
@@ -263,7 +264,7 @@ static void setSel(int i) {
 }
 
 static void releaseApp() {            // forget pointers into the app screen before it goes away
-  dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr; pickerObj = nullptr; for (auto& g : pickerGrids) g = nullptr;
+  dbgLabel = nullptr; convBox = nullptr; thrBox = nullptr; taInput = nullptr; inSend = inEmoji = inClear = nullptr; pickerObj = nullptr; for (auto& g : pickerGrids) g = nullptr;
   if (mapview_active()) mapview_destroy();
   listBox = nullptr; listN = 0; pinMsg = nullptr; resetArmed = false;
   brightSlider = nullptr; brightLbl = nullptr; nodesBox = nullptr; stBox = nullptr; stPill = nullptr; stNote = nullptr; sigTarget = nullptr; sigBtnLbl = nullptr; sigStatus = nullptr;
@@ -646,6 +647,30 @@ static void showOnMapCb(lv_event_t* e) {
   char shown[48];
   emoji_filter(who, shown, sizeof(shown), false);   // the map's label font has no emoji
   openMapFocus(la / 1e6, lo / 1e6, shown);
+}
+
+// The message box is one line tall and grows to two only when the text wraps, so the thread keeps
+// the room. The send, emoji and clear buttons follow the box.
+static bool inTwoLines = false;
+static int inTextW = 200;
+static void layoutInput(bool two) {
+  if (!taInput || !thrBox) return;
+  inTwoLines = two;
+  const int h = two ? 52 : 34;
+  const int y = 240 - h - 4;
+  lv_obj_set_height(taInput, h);
+  lv_obj_set_y(taInput, y);
+  if (inSend) { lv_obj_set_height(inSend, h); lv_obj_set_y(inSend, y); }
+  if (inEmoji) { lv_obj_set_height(inEmoji, h); lv_obj_set_y(inEmoji, y); }
+  if (inClear) lv_obj_set_y(inClear, y + (h - 28) / 2);
+  lv_obj_set_height(thrBox, y - 2 - 58);
+  lv_obj_scroll_to_y(thrBox, LV_COORD_MAX, LV_ANIM_OFF);
+}
+static void inputChangedCb(lv_event_t* e) {
+  const char* t = lv_textarea_get_text(lv_event_get_target(e));
+  bool two = t && (strchr(t, '\n') ||
+                   lv_txt_get_width(t, strlen(t), emoji_font(&font_tdos_16), 0, LV_TEXT_FLAG_NONE) > inTextW);
+  if (two != inTwoLines) layoutInput(two);
 }
 
 static void buildThread() {
@@ -1046,7 +1071,7 @@ static void openThread(int conv) {
   }
 
   thrBox = lv_obj_create(s);
-  lv_obj_set_size(thrBox, 320, 240 - 58 - 60);
+  lv_obj_set_size(thrBox, 320, 240 - 58 - 42);
   lv_obj_set_pos(thrBox, 0, 58);
   lv_obj_set_style_bg_opa(thrBox, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(thrBox, 0, 0);
@@ -1057,8 +1082,9 @@ static void openThread(int conv) {
 
   taInput = lv_textarea_create(s);
   const int taW = emoji_pack_present() ? 212 : 250;   // room for the emoji button
-  lv_obj_set_size(taInput, taW, 52);                  // two lines of 16 pt text
-  lv_obj_set_pos(taInput, 6, 240 - 56);
+  inTextW = taW - 10 - 30 - 8;                        // text area width, less a margin so it grows before it wraps
+  lv_obj_set_size(taInput, taW, 34);                  // one line; layoutInput() grows it to two
+  lv_obj_set_pos(taInput, 6, 240 - 38);
   lv_textarea_set_one_line(taInput, false);
   lv_textarea_set_max_length(taInput, 140);
   lv_textarea_set_placeholder_text(taInput, "Message");
@@ -1085,16 +1111,18 @@ static void openThread(int conv) {
   lv_group_add_obj(inputGroup, taInput);
   lv_group_focus_obj(taInput);
 
-  lv_obj_t* send = tappable(box(s, 52, 52, ACCENT, 16));
-  lv_obj_set_pos(send, 262, 240 - 56);
+  lv_obj_t* send = tappable(box(s, 52, 34, ACCENT, 16));
+  lv_obj_set_pos(send, 262, 240 - 38);
+  inSend = send;
   lv_obj_t* sl = label(send, LV_SYMBOL_RIGHT, &font_tdos_20, INK);
   lv_obj_center(sl);
   lv_obj_add_event_cb(send, sendCb, LV_EVENT_CLICKED, nullptr);
 
   if (emoji_pack_present()) {
     pickerTab = 0;
-    lv_obj_t* eb = tappable(box(s, 36, 52, RAISE, 14));
-    lv_obj_set_pos(eb, 6 + taW + 4, 240 - 56);
+    lv_obj_t* eb = tappable(box(s, 36, 34, RAISE, 14));
+    lv_obj_set_pos(eb, 6 + taW + 4, 240 - 38);
+    inEmoji = eb;
     lv_obj_set_style_border_width(eb, 1, 0);
     lv_obj_set_style_border_color(eb, C(LINE), 0);
     lv_obj_center(label(eb, "\xF0\x9F\x98\x80", emoji_font(&font_tdos_16), TEXT));
@@ -1103,7 +1131,8 @@ static void openThread(int conv) {
 
   // Clear button inside the right edge of the box, shown only when there is text.
   lv_obj_t* clr = tappable(box(s, 28, 28, RAISE2, 14));
-  lv_obj_set_pos(clr, 6 + taW - 32, 240 - 56 + 12);
+  lv_obj_set_pos(clr, 6 + taW - 32, 240 - 38 + 3);
+  inClear = clr;
   lv_obj_center(label(clr, LV_SYMBOL_CLOSE, &font_tdos_14, MUTE));
   lv_obj_add_flag(clr, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_event_cb(clr, [](lv_event_t* e) {
@@ -1114,7 +1143,10 @@ static void openThread(int conv) {
     const char* t = lv_textarea_get_text(lv_event_get_target(e));
     if (t && *t) lv_obj_clear_flag(b, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
   }, LV_EVENT_VALUE_CHANGED, clr);
+  lv_obj_add_event_cb(taInput, inputChangedCb, LV_EVENT_VALUE_CHANGED, nullptr);
 
+  inTwoLines = false;
+  layoutInput(false);
   buildThread();
   shownVersion = msgs_version();
   loadApp(s);
