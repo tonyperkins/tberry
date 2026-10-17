@@ -73,6 +73,13 @@ void cov_stat(uint32_t utc, int32_t latE6, int32_t lonE6, uint32_t airMs, uint32
   row(utc, latE6, lonE6, "STAT", "", 0, 0, 0.0f, extra);
 }
 
+void cov_clear() {
+  used = 0;
+  memset(cells, 0, sizeof(cells));
+  rows = 0;
+  storage_clear_coverage();
+}
+
 void cov_tick() {
   if (!used) return;
   if (millis() - lastFlush < 20000 && used < BUF_BYTES / 2) return;

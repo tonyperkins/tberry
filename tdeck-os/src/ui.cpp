@@ -1205,7 +1205,7 @@ static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f,
 static constexpr int BW_N = 10;
 
 enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_WIFI, ROW_UPDATE, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
-enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
 
@@ -1948,6 +1948,7 @@ void ui_pin_key(int k) {
 }
 
 // ── Advanced ─────────────────────────────────────────────────────
+static bool covClearArmed = false;
 static void fillAdvanced() {
   if (!listBox) return;
   int keepScroll = lv_obj_get_scroll_y(listBox);
@@ -1977,6 +1978,8 @@ static void fillAdvanced() {
     addRow("Probe target", tn, AD_COVTARGET, K_NAV);
   }
   addRow("Send probe now", "Send", AD_COVNOW, K_BUTTON);
+  addRow(covClearArmed ? "Tap again to delete" : "Clear coverage log", covClearArmed ? "Confirm" : "Clear", AD_COVCLEAR, K_BUTTON);
+  if (covClearArmed) lv_obj_set_style_bg_color(listRows[listN - 1], C(0x4A1F1A), 0);
   addRow("PIN", "Change", AD_PIN, K_BUTTON);
   addRow("Run setup again", "Start", AD_SETUP, K_BUTTON);
   addRow(resetArmed ? "Tap again to confirm" : "Restore defaults", resetArmed ? "Confirm" : "Restore", AD_RESET, K_BUTTON);
@@ -1996,6 +1999,7 @@ static void openAdvanced() {
   newListBox(s);
   listSel = 0;
   resetArmed = false;
+  covClearArmed = false;
   fillAdvanced();
   loadApp(s);
 }
@@ -2117,6 +2121,13 @@ static void advAct(int id) {
       toast(r == 0 ? "Probe sent" : r == 1 ? "No GPS position yet" : r == 2 ? "Choose a target first" : "Could not send");
       return;
     }
+    case AD_COVCLEAR:
+      if (!covClearArmed) { covClearArmed = true; fillAdvanced(); return; }
+      covClearArmed = false;
+      cov_clear();
+      fillAdvanced();
+      toast("Coverage log cleared");
+      return;
     case AD_PIN:
       c.pinSet = 0;
       settings_changed();

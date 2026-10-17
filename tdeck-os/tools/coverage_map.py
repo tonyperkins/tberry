@@ -8,7 +8,8 @@ Rows (utc,lat,lon,type,node,hops,rssi,snr,extra):
   DISC  a repeater answered the discovery probe                  -> bigger dot, popup shows repeater and both SNRs
   DM    a direct-message probe to the target                     -> green ring if delivered, red cross if not
   STAT  airtime counters (used for the summary only)
-The map needs internet for the OpenStreetMap tiles and Leaflet, nothing else.
+The map needs internet for the Esri light-grey basemap tiles and Leaflet, nothing else. (OpenStreetMap's
+servers refuse pages opened from a local file, and CARTO's now want an API key.)
 """
 import argparse, csv, html, json, os, sys
 
@@ -69,7 +70,7 @@ def main():
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 var d={json.dumps(pts)};
-var m=L.map('m');L.tileLayer('https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(m);
+var m=L.map('m');L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{{z}}/{{y}}/{{x}}',{{maxZoom:16,attribution:'Tiles &copy; Esri'}}).addTo(m);
 var b=[];
 d.forEach(function(p){{var ll=[p[0],p[1]];b.push(ll);var mk;
  if(p[2]=='DM')mk=L.circleMarker(ll,{{radius:9,color:p[4],weight:3,fillOpacity:p[3]?0.1:0.5,fillColor:p[4]}});

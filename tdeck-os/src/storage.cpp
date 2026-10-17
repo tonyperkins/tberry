@@ -263,6 +263,12 @@ void storage_append_coverage(const char* rows, size_t len) {
   }
 }
 
+void storage_clear_coverage() {
+  if (!ready) return;
+  SD.remove("/tdos/coverage.csv");
+  SD.remove("/tdos/coverage.old");
+}
+
 void storage_remove_conv(const uint8_t key[4]) {
   if (!ready) return;
   char path[48];

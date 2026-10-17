@@ -14,6 +14,7 @@ void cov_rx(uint32_t utc, int32_t latE6, int32_t lonE6, int hops, uint32_t lastH
 void cov_disc(uint32_t utc, int32_t latE6, int32_t lonE6, const uint8_t* key, float upSnr, int rssi, float snr);
 void cov_dm(uint32_t utc, int32_t latE6, int32_t lonE6, bool ok, uint32_t rttMs, int hops, int rssi, float snr);
 void cov_stat(uint32_t utc, int32_t latE6, int32_t lonE6, uint32_t airMs, uint32_t tx, uint32_t rx);
+void cov_clear();                   // forget buffered rows and delete the log files
 void cov_tick();                    // call from the loop; writes the buffered rows now and then
 uint32_t cov_rows();                // rows logged since start
 
