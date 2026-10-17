@@ -15,6 +15,7 @@
 #include "nodes.h"
 #include "mapview.h"
 #include "rangetest.h"
+#include "coverage.h"
 #include "fonts/fonts.h"
 #include "emoji.h"
 #include "remote.h"
@@ -1204,7 +1205,7 @@ static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f,
 static constexpr int BW_N = 10;
 
 enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_WIFI, ROW_UPDATE, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
-enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
 
@@ -1802,6 +1803,14 @@ static void pickPreset(int i) {
 static void pickBw(int i) { cfg().bw = bwList[constrain(i, 0, BW_N - 1)]; settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
 static void pickSf(int i) { cfg().sf = 5 + constrain(i, 0, 7); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
 static void pickCr(int i) { cfg().cr = 5 + constrain(i, 0, 3); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
+static void pickCovDisc(int i) { cfg().covDisc = (uint8_t)constrain(i, 0, COV_DISC_N - 1); settings_changed(); openAdvanced(); }
+static void pickCovDm(int i) { cfg().covDm = (uint8_t)constrain(i, 0, COV_DM_N - 1); settings_changed(); openAdvanced(); }
+static int covChoices[MAX_CONVS];
+static void pickCovTarget(int i) {
+  const Conv* k = (i >= 0 && i < MAX_CONVS) ? msgs_conv(covChoices[i]) : nullptr;
+  if (k) { memcpy(cfg().covTarget, k->key, 4); cfg().covTargetSet = 1; settings_changed(); }
+  openAdvanced();
+}
 static void pickPwr(int i) { cfg().txPower = 2 + constrain(i, 0, 20); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
 
 // ── Settings screen ──────────────────────────────────────────────
@@ -1959,6 +1968,15 @@ static void fillAdvanced() {
   snprintf(b, sizeof(b), "%d dBm", c.txPower);
   addRow("TX power", b, AD_PWR, K_NAV);
   addRow("Send advert", "Send", AD_ADVERT, K_BUTTON);
+  addRow("Coverage logging", c.covOn ? "On" : "Off", AD_COV, K_VALUE, c.covOn);
+  addRow("Discovery probe", COV_DISC_NAMES[constrain((int)c.covDisc, 0, COV_DISC_N - 1)], AD_COVDISC, K_NAV);
+  addRow("DM probe", COV_DM_NAMES[constrain((int)c.covDm, 0, COV_DM_N - 1)], AD_COVDM, K_NAV);
+  {
+    const char* tn = "Not set";
+    if (c.covTargetSet) { int ci = msgs_find(c.covTarget); const Conv* k = ci >= 0 ? msgs_conv(ci) : nullptr; tn = k ? k->name : "Unknown"; }
+    addRow("Probe target", tn, AD_COVTARGET, K_NAV);
+  }
+  addRow("Send probe now", "Send", AD_COVNOW, K_BUTTON);
   addRow("PIN", "Change", AD_PIN, K_BUTTON);
   addRow("Run setup again", "Start", AD_SETUP, K_BUTTON);
   addRow(resetArmed ? "Tap again to confirm" : "Restore defaults", resetArmed ? "Confirm" : "Restore", AD_RESET, K_BUTTON);
@@ -2066,6 +2084,39 @@ static void advAct(int id) {
       if (actions.advertise) actions.advertise();
       toast("Advert sent");
       return;
+    case AD_COV:
+      c.covOn = c.covOn ? 0 : 1;
+      settings_changed();
+      fillAdvanced();
+      return;
+    case AD_COVDISC:
+      for (int i = 0; i < COV_DISC_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", COV_DISC_NAMES[i]);
+      openPicker("Discovery probe", COV_DISC_N, constrain((int)c.covDisc, 0, COV_DISC_N - 1), pickCovDisc, M_ADV);
+      return;
+    case AD_COVDM:
+      for (int i = 0; i < COV_DM_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", COV_DM_NAMES[i]);
+      openPicker("DM probe to target", COV_DM_N, constrain((int)c.covDm, 0, COV_DM_N - 1), pickCovDm, M_ADV);
+      return;
+    case AD_COVTARGET: {
+      int order[MAX_CONVS];
+      int n = msgs_sorted(order, MAX_CONVS), m = 0, cur = 0;
+      for (int i = 0; i < n && m < 24; i++) {
+        const Conv* k = msgs_conv(order[i]);
+        if (!k || k->channel) continue;
+        if (c.covTargetSet && memcmp(k->key, c.covTarget, 4) == 0) cur = m;
+        covChoices[m] = order[i];
+        emoji_filter(k->name, pickBuf[m], sizeof(pickBuf[m]), false);
+        m++;
+      }
+      if (m == 0) { toast("Nobody known yet"); return; }
+      openPicker("Send probes to", m, cur, pickCovTarget, M_ADV);
+      return;
+    }
+    case AD_COVNOW: {
+      int r = actions.probeNow ? actions.probeNow() : 3;
+      toast(r == 0 ? "Probe sent" : r == 1 ? "No GPS position yet" : r == 2 ? "Choose a target first" : "Could not send");
+      return;
+    }
     case AD_PIN:
       c.pinSet = 0;
       settings_changed();
@@ -2680,6 +2731,13 @@ static void quickGpsCb(lv_event_t*) {
   if (quickGpsIcon) lv_obj_set_style_text_color(quickGpsIcon, C(cfg().gpsEnabled ? GOOD : 0x3A4658), 0);
   if (quickGpsText) lv_label_set_text(quickGpsText, cfg().gpsEnabled ? "GPS on" : "GPS off");
 }
+static lv_obj_t *quickCovIcon = nullptr, *quickCovText = nullptr;
+static void quickCovCb(lv_event_t*) {
+  cfg().covOn = cfg().covOn ? 0 : 1;
+  settings_changed();
+  if (quickCovIcon) lv_obj_set_style_text_color(quickCovIcon, C(cfg().covOn ? GOOD : 0x3A4658), 0);
+  if (quickCovText) lv_label_set_text(quickCovText, cfg().covOn ? "Cover on" : "Cover off");
+}
 static void quickLockCb(lv_event_t*) { closeQuick(); pendingGesture = G_NONE; goLock(); }
 static void quickSettingsCb(lv_event_t*) { closeQuick(); openSettings(); }
 
@@ -2729,22 +2787,24 @@ static void openQuick() {
   lv_obj_add_event_cb(ks, quickKeysCb, LV_EVENT_VALUE_CHANGED, nullptr);
 
   struct Btn { const char* text; const char* sym; lv_event_cb_t cb; };
-  const Btn btns[4] = {
+  const Btn btns[5] = {
     { "Advert", LV_SYMBOL_UPLOAD, quickAdvertCb },
     { "Lock", LV_SYMBOL_POWER, quickLockCb },
     { cfg().gpsEnabled ? "GPS on" : "GPS off", LV_SYMBOL_GPS, quickGpsCb },
+    { cfg().covOn ? "Cover on" : "Cover off", LV_SYMBOL_REFRESH, quickCovCb },
     { "Settings", LV_SYMBOL_SETTINGS, quickSettingsCb },
   };
-  for (int i = 0; i < 4; i++) {
-    lv_obj_t* b = tappable(box(panel, 74, 52, RAISE2, 14));
-    lv_obj_set_pos(b, 6 + i * 78, 118);
-    bool isGps = (i == 2);
-    uint32_t iconCol = isGps ? (cfg().gpsEnabled ? GOOD : 0x3A4658) : ACCENT;
+  for (int i = 0; i < 5; i++) {
+    lv_obj_t* b = tappable(box(panel, 58, 52, RAISE2, 14));
+    lv_obj_set_pos(b, 6 + i * 62, 118);
+    bool isGps = (i == 2), isCov = (i == 3);
+    uint32_t iconCol = isGps ? (cfg().gpsEnabled ? GOOD : 0x3A4658) : isCov ? (cfg().covOn ? GOOD : 0x3A4658) : ACCENT;
     lv_obj_t* ic = label(b, btns[i].sym, &font_tdos_16, iconCol);
     lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 6);
     lv_obj_t* tx = label(b, btns[i].text, &font_tdos_12, TEXT);
     lv_obj_align(tx, LV_ALIGN_BOTTOM_MID, 0, -6);
     if (isGps) { quickGpsIcon = ic; quickGpsText = tx; }
+    if (isCov) { quickCovIcon = ic; quickCovText = tx; }
     lv_obj_add_event_cb(b, btns[i].cb, LV_EVENT_CLICKED, nullptr);
   }
 
@@ -3341,6 +3401,7 @@ bool ui_console_active() { return mode == M_DBG; }
 int ui_mode() { return (int)mode; }
 #ifdef TDOS_REMOTE
 void ui_debug_setup(int step) { openSetup(step); }
+void ui_debug_advanced() { openAdvanced(); }
 #endif
 bool ui_screen_off() { return screenOff; }
 int ui_screen_state() { return mode != M_LOCK ? 0 : screenOff ? 2 : 1; }   // 0 on, 1 clock (dim), 2 off

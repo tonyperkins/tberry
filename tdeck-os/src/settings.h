@@ -27,6 +27,11 @@ struct Settings {
   char wifiSsid[33];       // network used for updates; empty = none saved
   char wifiPass[64];
   uint8_t kbLight;         // key backlight level 0 (off) to 4; lit only while the screen is on
+  uint8_t covOn;           // 1 = coverage logging and probes (default); the pull-down switch
+  uint8_t covDisc;         // index into COV_DISC_SECS: zero-hop discovery probe interval (default 1 minute)
+  uint8_t covDm;           // index into COV_DM_MINUTES: direct-message probe to the target (default 30 minutes)
+  uint8_t covTargetSet;    // 1 once a probe target has been chosen; probes to the owner are off until then
+  uint8_t covTarget[4];    // first bytes of the target contact's public key
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults

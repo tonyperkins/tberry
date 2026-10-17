@@ -27,6 +27,7 @@ static char line[160];
 static int lineLen = 0;
 static char reply[96];
 static bool replyPending = false;
+void tdos_fake_position(bool on, int32_t laE6, int32_t loE6);   // main.cpp
 static bool busy = false;               // a command is still running; its OK follows
 static uint32_t busyUntil = 0;          // time-based commands (wait, settling after input)
 static bool wantIdle = false;           // OK when the touch queue is empty and the UI had time to react
@@ -113,6 +114,8 @@ static void exec(char* s) {
   if (!strcmp(s, "long")) { ui_long(); busyUntil = millis() + 300; busy = true; return; }
   if (sscanf(s, "wait %d", &a) == 1) { busyUntil = millis() + a; busy = true; return; }
   if (!strcmp(s, "shot")) { startShot(); busy = true; return; }
+  { double fa, fo; if (sscanf(s, "fakepos %lf %lf", &fa, &fo) == 2) { tdos_fake_position(true, (int32_t)(fa * 1e6), (int32_t)(fo * 1e6)); return say("OK"); } }
+  if (strcmp(s, "adv") == 0) { ui_debug_advanced(); busyUntil = millis() + 400; busy = true; return; }
   if (sscanf(s, "setup %d", &a) == 1) { ui_debug_setup(a); busyUntil = millis() + 400; busy = true; return; }
   if (!strcmp(s, "crash")) { volatile int* p = nullptr; *p = 1; return; }       // test the crash record
   if (!strcmp(s, "hang")) { while (true) { delay(100); } }                       // test the watchdog (loop never returns)

@@ -247,6 +247,22 @@ void storage_log_battery(uint32_t uptimeS, uint32_t utc, int mv, int pct, bool u
   }
 }
 
+void storage_append_coverage(const char* rows, size_t len) {
+  if (!ready || !len) return;
+  const char* path = "/tdos/coverage.csv";
+  bool fresh = !SD.exists(path);
+  File f = SD.open(path, FILE_APPEND);
+  if (!f) return;
+  if (fresh) f.println("utc,lat,lon,type,node,hops,rssi,snr,extra");
+  f.write((const uint8_t*)rows, len);
+  bool big = f.size() > 2 * 1024 * 1024;
+  f.close();
+  if (big) {
+    SD.remove("/tdos/coverage.old");
+    SD.rename(path, "/tdos/coverage.old");
+  }
+}
+
 void storage_remove_conv(const uint8_t key[4]) {
   if (!ready) return;
   char path[48];

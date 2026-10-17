@@ -3,6 +3,7 @@
 // device's own flash so the node works, and keeps its identity, without a card.
 #include <SPI.h>
 #include <stdint.h>
+#include <stddef.h>
 
 bool storage_begin(SPIClass& spi, int csPin);   // mounts the card and registers the message sink
 bool storage_ready();                           // a card is mounted and usable
@@ -16,4 +17,5 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
 // derived from (their timestamp, the full packet hash, the raw text), so the code can be reverse
 // engineered offline once a few reactions have been seen. /tdos/idlog.csv, capped at 3 MB.
 void storage_log_idrow(uint32_t rxTs, uint32_t senderTs, int hops, const uint8_t hash8[8], const char* rawText);
+void storage_append_coverage(const char* rows, size_t len);   // /tdos/coverage.csv, header added, two 2 MB generations
 void storage_tick();                            // call every loop pass; writes are batched

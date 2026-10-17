@@ -47,6 +47,7 @@ bool ui_screen_off();                  // the backlight is off (nothing needs re
 int ui_screen_state();                // 0 on, 1 clock screen (dim), 2 off
 #ifdef TDOS_REMOTE
 void ui_debug_setup(int step);         // open a first-boot setup page (screenshots)
+void ui_debug_advanced();              // open Advanced without the PIN (debug builds only)
 #endif
 int ui_mode();                        // current screen id (debug and remote control)
 void ui_activity();                   // any input counts as activity (keeps the screen awake)
@@ -64,5 +65,6 @@ struct UiActions {
   bool (*sendTest)(int conv);              // send a range-test message into a conversation
   int (*joinChannel)(const char* name);    // join a hashtag channel: conversation index, -1 bad name, -2 no room
   void (*leaveChannel)(int conv);          // leave a hashtag channel and forget its messages
+  int (*probeNow)();                       // coverage: send a probe to the target now (0 sent, 1 no GPS, 2 no target, 3 failed)
 };
 void ui_set_actions(const UiActions& a);

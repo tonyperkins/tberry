@@ -36,6 +36,7 @@
 #include "reaction.h"
 #include "nodes.h"
 #include "rangetest.h"
+#include "coverage.h"
 
 #define PUBLIC_GROUP_PSK "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -103,6 +104,8 @@ static void chatPush(const char* fmt, ...) {
 
 extern CustomSX1262 radio;               // defined below; the mesh node asks it for time on air
 
+static bool covPos(int32_t& latE6, int32_t& lonE6);      // a fresh, trusted GPS position, if there is one
+
 // ── The mesh node ────────────────────────────────────────────────
 class DeckMesh : public BaseChatMesh {
   fs::FS* _fs = nullptr;
@@ -119,6 +122,12 @@ class DeckMesh : public BaseChatMesh {
   HashChan _hc[MAX_HASH] = {};
   bool _dirty = false;
   uint32_t _lastSaveMs = 0;
+  // Coverage probes (coverage.h): a zero-hop discovery request that repeaters answer, and a direct
+  // message to the chosen target whose delivery says whether we can reach them from here.
+  static constexpr uint32_t PROBE_WAIT_MS = 45000;
+  uint32_t _discTag = 0, _discUntil = 0;
+  int32_t _discLa = 0, _discLo = 0;
+  struct Probe { uint32_t ack; uint32_t sentMs; int32_t la, lo; uint8_t key[4]; } _probe = {};
 
   void loadContacts() {
     if (!_fs->exists("/contacts")) return;
@@ -196,6 +205,7 @@ protected:
     _dirty = true;
   }
   ContactInfo* processAck(const uint8_t* data) override {
+    if (_probe.ack && memcmp(data, &_probe.ack, 4) == 0) finishProbe(true);
     for (auto& p : _pending) {
       if (p.ack && memcmp(data, &p.ack, 4) == 0) {
         uint32_t rtt = millis() - p.sentMs;
@@ -316,6 +326,44 @@ protected:
     sig_finish(r);
     storage_log_signal(r.ts, r.name, ok, rttMs, r.hops, r.rssi, r.snr4 / 4.0f);
     if (ok) audio_play(SND_TEST_OK);
+  }
+
+  // Every packet heard is a coverage sample; passive rows are thinned in coverage.cpp.
+  void logRx(mesh::Packet* pkt, int len, float score) override {
+    if (pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL) logf("cov: control packet b0=%02X len=%d route=%d\n", pkt->payload[0], (int)pkt->payload_len, (int)pkt->isRouteDirect());
+    if (!cfg().covOn || pkt->getPayloadType() == PAYLOAD_TYPE_CONTROL) return;   // discovery answers are logged as DISC
+    int32_t la, lo;
+    if (!covPos(la, lo)) return;
+    int hops = pkt->isRouteFlood() ? (int)pkt->getPathHashCount() : -1;
+    uint8_t sz = pkt->getPathHashSize();
+    uint32_t last = 0;
+    if (hops > 0) for (int i = 0; i < sz && i < 4; i++) last = (last << 8) | pkt->path[(hops - 1) * sz + i];
+    cov_rx(getRTCClock()->getCurrentTime(), la, lo, hops, last, sz < 4 ? sz : 4, (int)radio_driver.getLastRSSI(), pkt->getSNR());
+  }
+
+  // Discovery answers: byte 0 is 0x90 | node type, byte 1 the SNR the repeater heard our request at (x4),
+  // bytes 2-5 our tag, then the repeater's public key.
+  void onControlDataRecv(mesh::Packet* pkt) override {
+    if ((pkt->payload[0] & 0xF0) != 0x90 || pkt->payload_len < 6 + 8) return;
+    if (!_discTag || millisHasNowPassed(_discUntil)) return;
+    uint32_t tag;
+    memcpy(&tag, &pkt->payload[2], 4);
+    if (tag != _discTag) return;
+    cov_disc(getRTCClock()->getCurrentTime(), _discLa, _discLo, &pkt->payload[6], (int8_t)pkt->payload[1] / 4.0f,
+             (int)radio_driver.getLastRSSI(), pkt->getSNR());
+    logf("cov: discovery answer %02X%02X rssi %d snr %.1f up %.1f\n", pkt->payload[6], pkt->payload[7], (int)radio_driver.getLastRSSI(), pkt->getSNR(), (int8_t)pkt->payload[1] / 4.0f);
+  }
+
+  void finishProbe(bool ok) {
+    uint32_t rtt = millis() - _probe.sentMs;
+    int hops = -1;
+    if (ok) {
+      ContactInfo* ci = lookupContactByPubKey(_probe.key, 4);
+      if (ci && ci->out_path_len != 0xFF) hops = ci->out_path_len & 63;
+    }
+    cov_dm(getRTCClock()->getCurrentTime(), _probe.la, _probe.lo, ok, rtt, hops, (int)radio_driver.getLastRSSI(), radio_driver.getLastSNR());
+    logf("cov: dm probe %s rtt=%lu hops=%d\n", ok ? "delivered" : "no ack", (unsigned long)rtt, hops);
+    _probe.ack = 0;
   }
 
   void onSendTimeout() override {
@@ -461,12 +509,47 @@ public:
         p.ack = 0;
       }
     }
+    if (_probe.ack && millis() - _probe.sentMs > PROBE_WAIT_MS) finishProbe(false);
     if (_dirty && millis() - _lastSaveMs > 15000) {
       saveContacts();
       nodes_positions_save(*_fs);
       _dirty = false;
       _lastSaveMs = millis();
     }
+  }
+
+  // Zero-hop request: repeaters in direct range answer, so it costs one short packet and floods nothing.
+  bool sendDiscover(int32_t la, int32_t lo) {
+    uint8_t data[10];
+    data[0] = 0x80;                                  // CTL_TYPE_NODE_DISCOVER_REQ
+    data[1] = (1 << ADV_TYPE_REPEATER);
+    getRNG()->random(&data[2], 4);
+    memcpy(&_discTag, &data[2], 4);
+    if (!_discTag) _discTag = 1;
+    memcpy(&data[2], &_discTag, 4);
+    memset(&data[6], 0, 4);                          // "since": everything
+    mesh::Packet* pkt = createControlData(data, sizeof(data));
+    if (!pkt) return false;
+    sendZeroHop(pkt);
+    _discUntil = futureMillis(8000);
+    _discLa = la; _discLo = lo;
+    return true;
+  }
+
+  // A direct message to the coverage target; the ACK (or its absence) is the measurement. It floods
+  // until a route is known, so it is the one expensive probe and is spaced out by the setting.
+  bool sendProbe(const uint8_t key4[4], int32_t la, int32_t lo) {
+    if (_probe.ack) return false;                    // one at a time
+    ContactInfo* ci = lookupContactByPubKey(key4, 4);
+    if (!ci) return false;
+    char text[48];
+    snprintf(text, sizeof(text), "Coverage probe %.4f,%.4f", la / 1e6, lo / 1e6);
+    uint32_t ack = 0, est = 0;
+    int r = sendMessage(*ci, getRTCClock()->getCurrentTime(), 0, text, ack, est);
+    if (r == MSG_SEND_FAILED || !ack) return false;
+    _probe = { ack, millis(), la, lo, {} };
+    memcpy(_probe.key, key4, 4);
+    return true;
   }
 
   bool sendTest(int conv) {
@@ -788,6 +871,65 @@ static void kbBacklightTick() {
   if (Wire.endTransmission(true) == 0) sent = want;
 }
 
+// ── Coverage probing ─────────────────────────────────────────────
+// A position is usable for coverage only while the GPS vouches for it (see evalGpsValidity).
+#ifdef TDOS_REMOTE
+static bool fakePosOn = false;                           // bench testing indoors: a pretend position
+static int32_t fakeLa = 0, fakeLo = 0;
+void tdos_fake_position(bool on, int32_t laE6, int32_t loE6) { fakePosOn = on; fakeLa = laE6; fakeLo = loE6; }
+#endif
+static bool covPos(int32_t& latE6, int32_t& lonE6) {
+#ifdef TDOS_REMOTE
+  if (fakePosOn) { latE6 = fakeLa + (int32_t)(millis() / 20000) * 300; lonE6 = fakeLo; return true; }   // drifts ~33 m north every 20 s
+#endif
+  if (!gpsPosValid || millis() - gpsPosMs > 15000) return false;
+  latE6 = gpsLatE6;
+  lonE6 = gpsLonE6;
+  return true;
+}
+
+static float metersBetween(int32_t la1, int32_t lo1, int32_t la2, int32_t lo2) {
+  float dy = (la2 - la1) * 0.111195f;                       // one micro-degree of latitude is 0.111 m
+  float dx = (lo2 - lo1) * 0.111195f * cosf(la1 * 1e-6f * 0.0174533f);
+  return sqrtf(dx * dx + dy * dy);
+}
+
+// Discovery and DM probes run only while moving, never on a low battery, and the DM probe only when a
+// target has been chosen. Rare by default: the DM floods the mesh until a route is known.
+static void covTick(uint32_t now, bool lowBattery) {
+  cov_tick();
+  const Settings& c = cfg();
+  if (!theMesh || !c.covOn || now < 60000) return;
+  int32_t la, lo;
+  if (!covPos(la, lo)) return;
+  static uint32_t lastDisc = 0, lastDm = 0, lastStat = 0;
+  static int32_t dLa = 0, dLo = 0, mLa = 0, mLo = 0;
+  static bool dHave = false, mHave = false;
+  if (!lowBattery) {
+    uint32_t ds = COV_DISC_SECS[constrain((int)c.covDisc, 0, COV_DISC_N - 1)];
+    if (ds && now - lastDisc >= ds * 1000UL && (!dHave || metersBetween(dLa, dLo, la, lo) >= 25.0f)) {
+      if (theMesh->sendDiscover(la, lo)) { logf("cov: discovery sent\n"); lastDisc = now; dLa = la; dLo = lo; dHave = true; }
+    }
+    uint32_t dm = COV_DM_MINUTES[constrain((int)c.covDm, 0, COV_DM_N - 1)];
+    if (dm && c.covTargetSet && now - lastDm >= dm * 60000UL && (!mHave || metersBetween(mLa, mLo, la, lo) >= 500.0f)) {
+      if (theMesh->sendProbe(c.covTarget, la, lo)) { logf("cov: dm probe sent\n"); lastDm = now; mLa = la; mLo = lo; mHave = true; }
+    }
+  }
+  if (now - lastStat >= 600000) {               // what all this costs on air, every 10 minutes
+    lastStat = now;
+    cov_stat(rtc.getCurrentTime(), la, lo, theMesh->getTotalAirTime(), radio_driver.getPacketsSent(), radio_driver.getPacketsRecv());
+  }
+}
+
+// "Send a probe now" from Settings: 0 sent, 1 no GPS position, 2 no target chosen, 3 could not send.
+static int probeNow() {
+  int32_t la, lo;
+  if (!theMesh) return 3;
+  if (!covPos(la, lo)) return 1;
+  if (!cfg().covTargetSet) return 2;
+  return theMesh->sendProbe(cfg().covTarget, la, lo) ? 0 : 3;
+}
+
 static void buildModel(UiModel& m) {
   m.utc = rtc.getCurrentTime();
   m.clockValid = m.utc > 1700000000UL;
@@ -868,6 +1010,7 @@ static const UiActions uiActions = {
   /* sendTest   */ [](int conv) { return theMesh && theMesh->sendTest(conv); },
   /* joinChannel  */ [](const char* name) { return theMesh ? theMesh->addHashChannel(name, true) : -1; },
   /* leaveChannel */ [](int conv) { if (theMesh) theMesh->leaveChannel(conv); },
+  /* probeNow     */ []() { return probeNow(); },
 };
 
 void setup() {
@@ -943,6 +1086,7 @@ void setup() {
   } else {
     chatPush("radio init failed");
   }
+  cov_begin();
   diag_watchdog_start();
 }
 
@@ -962,10 +1106,12 @@ void loop() {
   diag_tick(loopMax);
 
   uint32_t now = millis();
+  static bool lowBatt = false;
   if (now - lastDraw >= 250) {
     lastDraw = now;
     static UiModel model;
     buildModel(model);
+    lowBatt = model.batteryPct <= 15 && !model.charging;
     if (!ui_screen_off()) ui_update(model);      // nothing to draw while the backlight is off
     static uint32_t lastBattLog = 0;             // battery log: first row after a minute, then every 5 minutes
     if (now > 60000 && (lastBattLog == 0 || now - lastBattLog >= 300000)) {
@@ -976,9 +1122,10 @@ void loop() {
   }
   ui_tick();
   kbBacklightTick();
+  covTick(now, lowBatt);
   if (now - lastLog >= 5000) {
     lastLog = now;
-    logf("i2c: %s  lvgl free %lu\n", i2cFound, (unsigned long)ui_lvgl_free());
+    logf("i2c: %s  lvgl free %lu tx=%lu rx=%lu cov=%lu\n", i2cFound, (unsigned long)ui_lvgl_free(), (unsigned long)radio_driver.getPacketsSent(), (unsigned long)radio_driver.getPacketsRecv(), (unsigned long)cov_rows());
     logf("up=%lus contacts=%d loopmax=%lums heap=%u ball U%lu D%lu L%lu R%lu\n", (unsigned long)(now / 1000),
          theMesh ? theMesh->getNumContacts() : 0, (unsigned long)loopMax, (unsigned)ESP.getFreeHeap(),
          (unsigned long)isrUp, (unsigned long)isrDown, (unsigned long)isrLeft, (unsigned long)isrRight);
