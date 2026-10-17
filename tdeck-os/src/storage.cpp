@@ -267,6 +267,61 @@ void storage_clear_coverage() {
   if (!ready) return;
   SD.remove("/tdos/coverage.csv");
   SD.remove("/tdos/coverage.old");
+  SD.remove("/tdos/cov.sent");
+}
+
+uint32_t storage_coverage_size() {
+  if (!ready) return 0;
+  File f = SD.open("/tdos/coverage.csv");
+  if (!f) return 0;
+  uint32_t n = f.size();
+  f.close();
+  return n;
+}
+
+size_t storage_coverage_read(uint32_t offset, char* buf, size_t max) {
+  if (!ready) return 0;
+  File f = SD.open("/tdos/coverage.csv");
+  if (!f) return 0;
+  size_t got = 0;
+  if (f.seek(offset)) got = f.read((uint8_t*)buf, max);
+  f.close();
+  return got;
+}
+
+uint32_t storage_coverage_sent() {
+  char b[16];
+  return storage_read_line("/tdos/cov.sent", b, sizeof(b), 0) ? (uint32_t)strtoul(b, nullptr, 10) : 0;
+}
+
+void storage_coverage_set_sent(uint32_t offset) {
+  if (!ready) return;
+  File f = SD.open("/tdos/cov.sent", FILE_WRITE);
+  if (!f) return;
+  f.printf("%lu\n", (unsigned long)offset);
+  f.close();
+}
+
+bool storage_read_line(const char* path, char* out, size_t n, int lineNo) {
+  if (!ready || !n) return false;
+  File f = SD.open(path);
+  if (!f) return false;
+  int at = 0;
+  size_t o = 0;
+  bool have = false;
+  while (f.available()) {
+    int c = f.read();
+    if (c == '\n') { if (at == lineNo) { have = true; break; } at++; continue; }
+    if (c == '\r') continue;
+    if (at == lineNo && o + 1 < n) { out[o++] = (char)c; have = true; }
+  }
+  f.close();
+  out[o] = 0;
+  return have;
+}
+
+void storage_remove(const char* path) {
+  if (ready) SD.remove(path);
 }
 
 void storage_remove_conv(const uint8_t key[4]) {

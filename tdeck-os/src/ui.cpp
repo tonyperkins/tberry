@@ -16,6 +16,7 @@
 #include "mapview.h"
 #include "rangetest.h"
 #include "coverage.h"
+#include "covsync.h"
 #include "fonts/fonts.h"
 #include "emoji.h"
 #include "remote.h"
@@ -1205,7 +1206,7 @@ static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f,
 static constexpr int BW_N = 10;
 
 enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_WIFI, ROW_UPDATE, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
-enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_UPON, AD_UPURL, AD_UPKEY, AD_UPNOW, AD_UPSTAT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
 
@@ -1412,6 +1413,29 @@ static bool saveName(const char* t) {
   strncpy(lastName, clean, sizeof(lastName) - 1);
   openSettings();
   toast("Name saved, advert sent");
+  return true;
+}
+
+static bool saveUpUrl(const char* t) {
+  char u[96];
+  snprintf(u, sizeof(u), "%s", t);
+  for (int n = (int)strlen(u); n > 0 && (u[n - 1] == ' ' || u[n - 1] == '\n'); n--) u[n - 1] = 0;
+  bool ok = !u[0] || !strncmp(u, "https://", 8);
+#ifdef TDOS_COV_ALLOW_HTTP
+  ok = ok || !strncmp(u, "http://", 7);
+#endif
+  if (!ok) { toast("Address must start with https://"); return false; }
+  snprintf(cfg().covUrl, sizeof(cfg().covUrl), "%s", u);
+  settings_changed();
+  openAdvanced();
+  toast(u[0] ? "Address saved" : "Address cleared");
+  return true;
+}
+static bool saveUpKey(const char* t) {
+  snprintf(cfg().covKey, sizeof(cfg().covKey), "%s", t);
+  settings_changed();
+  openAdvanced();
+  toast(t[0] ? "Key saved" : "Key cleared");
   return true;
 }
 
@@ -1980,6 +2004,20 @@ static void fillAdvanced() {
   addRow("Send probe now", "Send", AD_COVNOW, K_BUTTON);
   addRow(covClearArmed ? "Tap again to delete" : "Clear coverage log", covClearArmed ? "Confirm" : "Clear", AD_COVCLEAR, K_BUTTON);
   if (covClearArmed) lv_obj_set_style_bg_color(listRows[listN - 1], C(0x4A1F1A), 0);
+  addRow("Upload when home", c.covUpload ? "On" : "Off", AD_UPON, K_VALUE, c.covUpload);
+  {
+    char hostBuf[24] = "Not set";
+    const char* h = c.covUrl[0] ? strstr(c.covUrl, "://") : nullptr;
+    if (c.covUrl[0]) {                                  // just the host: the whole address does not fit the row
+      snprintf(hostBuf, sizeof(hostBuf), "%.22s", h ? h + 3 : c.covUrl);
+      char* slash = strchr(hostBuf, '/');
+      if (slash) *slash = 0;
+    }
+    addRow("Receiver", hostBuf, AD_UPURL, K_NAV);
+  }
+  addRow("Upload key", c.covKey[0] ? "Set" : "Not set", AD_UPKEY, K_NAV);
+  addRow("Upload now", "Upload", AD_UPNOW, K_BUTTON);
+  addRow("Upload status", covsync_status(), AD_UPSTAT, K_INFO);
   addRow("PIN", "Change", AD_PIN, K_BUTTON);
   addRow("Run setup again", "Start", AD_SETUP, K_BUTTON);
   addRow(resetArmed ? "Tap again to confirm" : "Restore defaults", resetArmed ? "Confirm" : "Restore", AD_RESET, K_BUTTON);
@@ -2127,6 +2165,20 @@ static void advAct(int id) {
       cov_clear();
       fillAdvanced();
       toast("Coverage log cleared");
+      return;
+    case AD_UPON:
+      c.covUpload = c.covUpload ? 0 : 1;
+      settings_changed();
+      fillAdvanced();
+      return;
+    case AD_UPURL:
+      openEntry("Upload address", "https://your-host/api/coverage", c.covUrl, 95, false, saveUpUrl, M_ADV);
+      return;
+    case AD_UPKEY:
+      openEntry("Upload key", "The key from your receiver.", "", 39, false, saveUpKey, M_ADV);
+      return;
+    case AD_UPNOW:
+      toast(actions.uploadNow && actions.uploadNow() ? "Uploading when WiFi is reachable" : "Set address, key and WiFi first");
       return;
     case AD_PIN:
       c.pinSet = 0;

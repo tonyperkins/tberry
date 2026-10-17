@@ -307,3 +307,4 @@ void updater_stop() {
 }
 
 const UpStatus& updater_status() { return st; }
+bool updater_busy() { return busy; }

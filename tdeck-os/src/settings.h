@@ -32,6 +32,9 @@ struct Settings {
   uint8_t covDm;           // index into COV_DM_MINUTES: direct-message probe to the target (default 30 minutes)
   uint8_t covTargetSet;    // 1 once a probe target has been chosen; probes to the owner are off until then
   uint8_t covTarget[4];    // first bytes of the target contact's public key
+  uint8_t covUpload;       // 1 = upload the coverage log over WiFi when at home (needs an address and key)
+  char covUrl[96];         // receiver address, https://host/api/coverage
+  char covKey[40];         // key sent as X-API-Key
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults

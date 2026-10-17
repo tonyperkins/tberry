@@ -37,6 +37,7 @@
 #include "nodes.h"
 #include "rangetest.h"
 #include "coverage.h"
+#include "covsync.h"
 
 #define PUBLIC_GROUP_PSK "izOH6cXN6mrJ5e26oRXNcg=="
 
@@ -1011,6 +1012,7 @@ static const UiActions uiActions = {
   /* joinChannel  */ [](const char* name) { return theMesh ? theMesh->addHashChannel(name, true) : -1; },
   /* leaveChannel */ [](int conv) { if (theMesh) theMesh->leaveChannel(conv); },
   /* probeNow     */ []() { return probeNow(); },
+  /* uploadNow    */ []() { return covsync_now(); },
 };
 
 void setup() {
@@ -1087,6 +1089,8 @@ void setup() {
     chatPush("radio init failed");
   }
   cov_begin();
+  covsync_begin();
+  covsync_set_device(theMesh ? theMesh->name : "tdeck");
   diag_watchdog_start();
 }
 
@@ -1123,6 +1127,11 @@ void loop() {
   ui_tick();
   kbBacklightTick();
   covTick(now, lowBatt);
+  {                                            // uploads wait until the car has stopped
+    bool fresh = gpsPosValid && now - gpsPosMs < 15000;
+    if (theMesh) covsync_set_device(theMesh->name);
+    covsync_tick(now, !fresh || gpsInfo.speedKmh < 3.0f, lowBatt);
+  }
   if (now - lastLog >= 5000) {
     lastLog = now;
     logf("i2c: %s  lvgl free %lu tx=%lu rx=%lu cov=%lu\n", i2cFound, (unsigned long)ui_lvgl_free(), (unsigned long)radio_driver.getPacketsSent(), (unsigned long)radio_driver.getPacketsRecv(), (unsigned long)cov_rows());

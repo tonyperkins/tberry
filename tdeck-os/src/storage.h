@@ -19,4 +19,10 @@ void storage_log_signal(uint32_t ts, const char* name, bool ok, uint32_t rttMs, 
 void storage_log_idrow(uint32_t rxTs, uint32_t senderTs, int hops, const uint8_t hash8[8], const char* rawText);
 void storage_append_coverage(const char* rows, size_t len);   // /tdos/coverage.csv, header added, two 2 MB generations
 void storage_clear_coverage();                                // delete the coverage log (both generations)
+uint32_t storage_coverage_size();                                // bytes in /tdos/coverage.csv (0 if none)
+size_t storage_coverage_read(uint32_t offset, char* buf, size_t max);   // raw bytes from the log, for upload
+uint32_t storage_coverage_sent();                             // how far the upload has got (bytes into the log)
+void storage_coverage_set_sent(uint32_t offset);
+bool storage_read_line(const char* path, char* out, size_t n, int lineNo);   // one text line, trimmed; false if missing
+void storage_remove(const char* path);
 void storage_tick();                            // call every loop pass; writes are batched

@@ -36,5 +36,6 @@ int updater_scan_rssi(int i);
 
 void updater_check_start();            // connect and look for an update
 void updater_install_start();          // after UP_AVAILABLE
+bool updater_busy();                   // a scan, check or install is running (WiFi is in use)
 void updater_stop();                   // cancel what is running, switch WiFi off
 const UpStatus& updater_status();

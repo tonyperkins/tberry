@@ -1,0 +1,12 @@
+# Put a TLS reverse proxy (or tunnel) in front of this; the T-Deck release build only talks https.
+services:
+  coverage:
+    build: .
+    restart: unless-stopped
+    environment:
+      # one key per device so each can be told apart; generate with: python3 -c "import secrets;print(secrets.token_urlsafe(32))"
+      COV_API_KEYS: "CHANGE-ME-ALEX-KEY:alex,CHANGE-ME-TONY-KEY:tony"
+    volumes:
+      - ./data:/data
+    ports:
+      - "8765:8765"

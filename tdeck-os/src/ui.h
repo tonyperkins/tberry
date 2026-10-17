@@ -66,5 +66,6 @@ struct UiActions {
   int (*joinChannel)(const char* name);    // join a hashtag channel: conversation index, -1 bad name, -2 no room
   void (*leaveChannel)(int conv);          // leave a hashtag channel and forget its messages
   int (*probeNow)();                       // coverage: send a probe to the target now (0 sent, 1 no GPS, 2 no target, 3 failed)
+  bool (*uploadNow)();                     // coverage: upload the log now if the settings allow it
 };
 void ui_set_actions(const UiActions& a);
