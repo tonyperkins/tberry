@@ -369,6 +369,7 @@ static void tileCb(lv_event_t* e) { openApp((int)(intptr_t)lv_event_get_user_dat
 
 static void openSettings();
 static void openAdvanced();
+static int advPage = 0;                                  // Advanced: 0 menu, 1 Radio, 2 Coverage, 3 Upload, 4 Device
 static void openSignal();
 static bool closePicker() {
   if (!pickerObj) return false;
@@ -397,6 +398,7 @@ static void goBack() {
     else openSettings();
     return;
   }
+  if (mode == M_ADV && advPage != 0) { advPage = 0; openAdvanced(); return; }
   if (mode == M_PIN || mode == M_ADV) { openSettings(); return; }
   showHome();
 }
@@ -1206,7 +1208,7 @@ static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f,
 static constexpr int BW_N = 10;
 
 enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_WIFI, ROW_UPDATE, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
-enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_UPON, AD_UPURL, AD_UPKEY, AD_UPNOW, AD_UPSTAT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_UPON, AD_UPURL, AD_UPKEY, AD_UPNOW, AD_UPSTAT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO, AD_PG_RADIO, AD_PG_COV, AD_PG_UP, AD_PG_DEV };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
 
@@ -1432,6 +1434,7 @@ static bool saveUpUrl(const char* t) {
   return true;
 }
 static bool saveUpKey(const char* t) {
+  if (strlen(t) >= sizeof(cfg().covKey)) { toast("Key too long (39 max)"); return false; }
   snprintf(cfg().covKey, sizeof(cfg().covKey), "%s", t);
   settings_changed();
   openAdvanced();
@@ -1946,7 +1949,7 @@ void ui_pin_key(int k) {
   Settings& c = cfg();
   bool wrong = false;
   if (pinStage == 0) {
-    if (strcmp(pinBuf, c.pin) == 0) { openAdvanced(); return; }
+    if (strcmp(pinBuf, c.pin) == 0) { advPage = 0; openAdvanced(); return; }
     wrong = true;
   } else if (pinStage == 1) {
     strcpy(pinFirst, pinBuf);
@@ -1956,6 +1959,7 @@ void ui_pin_key(int k) {
       strcpy(c.pin, pinBuf);
       c.pinSet = 1;
       settings_changed();
+      advPage = 0;
       openAdvanced();
       toast("PIN saved");
       return;
@@ -1981,6 +1985,13 @@ static void fillAdvanced() {
   Settings& c = cfg();
   char b[48];
   int p = presetIndex();
+  if (advPage == 0) {                                    // the menu: each group is its own short page
+    addRow("Radio", p >= 0 ? presets[p].name : "Custom", AD_PG_RADIO, K_NAV);
+    addRow("Coverage", c.covOn ? "On" : "Off", AD_PG_COV, K_NAV);
+    addRow("Upload", covsync_status(), AD_PG_UP, K_NAV);
+    addRow("Device", "", AD_PG_DEV, K_NAV);
+  }
+  if (advPage == 1) {
   addRow("Radio preset", p >= 0 ? presets[p].name : "Custom", AD_PRESET, K_NAV);
   snprintf(b, sizeof(b), "%.3f MHz", c.freq);
   addRow("Frequency", b, AD_FREQ, K_NAV);
@@ -1993,6 +2004,8 @@ static void fillAdvanced() {
   snprintf(b, sizeof(b), "%d dBm", c.txPower);
   addRow("TX power", b, AD_PWR, K_NAV);
   addRow("Send advert", "Send", AD_ADVERT, K_BUTTON);
+  }
+  if (advPage == 2) {
   addRow("Coverage logging", c.covOn ? "On" : "Off", AD_COV, K_VALUE, c.covOn);
   addRow("Discovery probe", COV_DISC_NAMES[constrain((int)c.covDisc, 0, COV_DISC_N - 1)], AD_COVDISC, K_NAV);
   addRow("DM probe", COV_DM_NAMES[constrain((int)c.covDm, 0, COV_DM_N - 1)], AD_COVDM, K_NAV);
@@ -2004,6 +2017,8 @@ static void fillAdvanced() {
   addRow("Send probe now", "Send", AD_COVNOW, K_BUTTON);
   addRow(covClearArmed ? "Tap again to delete" : "Clear coverage log", covClearArmed ? "Confirm" : "Clear", AD_COVCLEAR, K_BUTTON);
   if (covClearArmed) lv_obj_set_style_bg_color(listRows[listN - 1], C(0x4A1F1A), 0);
+  }
+  if (advPage == 3) {
   addRow("Upload when home", c.covUpload ? "On" : "Off", AD_UPON, K_VALUE, c.covUpload);
   {
     char hostBuf[24] = "Not set";
@@ -2018,11 +2033,14 @@ static void fillAdvanced() {
   addRow("Upload key", c.covKey[0] ? "Set" : "Not set", AD_UPKEY, K_NAV);
   addRow("Upload now", "Upload", AD_UPNOW, K_BUTTON);
   addRow("Upload status", covsync_status(), AD_UPSTAT, K_INFO);
+  }
+  if (advPage == 4) {
   addRow("PIN", "Change", AD_PIN, K_BUTTON);
   addRow("Run setup again", "Start", AD_SETUP, K_BUTTON);
   addRow(resetArmed ? "Tap again to confirm" : "Restore defaults", resetArmed ? "Confirm" : "Restore", AD_RESET, K_BUTTON);
   if (resetArmed) lv_obj_set_style_bg_color(listRows[listN - 1], C(0x4A1F1A), 0);
   addRow("Build", "MeshCore 1.x", AD_INFO, K_INFO);
+  }
   if (listSel >= listN) listSel = listN - 1;
   if (listKind[listSel] == K_INFO) listSel = nextSelectable(listSel, -1);
   listHighlight();
@@ -2033,7 +2051,8 @@ static void openAdvanced() {
   mode = M_ADV;
   pinMsg = nullptr;
   lv_obj_t* s = newScreen();
-  headerFor(s, "Advanced");
+  static const char* const ADV_TITLES[5] = { "Advanced", "Radio", "Coverage", "Upload", "Device" };
+  headerFor(s, ADV_TITLES[constrain(advPage, 0, 4)]);
   newListBox(s);
   listSel = 0;
   resetArmed = false;
@@ -2091,6 +2110,10 @@ static void settingsAct(int id) {
 static void advAct(int id) {
   Settings& c = cfg();
   switch (id) {
+    case AD_PG_RADIO: case AD_PG_COV: case AD_PG_UP: case AD_PG_DEV:
+      advPage = id - AD_PG_RADIO + 1;
+      openAdvanced();
+      return;
     case AD_PRESET:
       for (int i = 0; i < PRESET_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", presets[i].name);
       openPicker("Radio preset", PRESET_N, presetIndex(), pickPreset, M_ADV);
@@ -2195,6 +2218,7 @@ static void advAct(int id) {
       settings_defaults(true);
       if (actions.applyRadio) actions.applyRadio();
       resetArmed = false;
+      advPage = 0;
       openSettings();
       toast("Defaults restored");
       return;
@@ -3464,7 +3488,7 @@ bool ui_console_active() { return mode == M_DBG; }
 int ui_mode() { return (int)mode; }
 #ifdef TDOS_REMOTE
 void ui_debug_setup(int step) { openSetup(step); }
-void ui_debug_advanced() { openAdvanced(); }
+void ui_debug_advanced() { advPage = 0; openAdvanced(); }
 #endif
 bool ui_screen_off() { return screenOff; }
 int ui_screen_state() { return mode != M_LOCK ? 0 : screenOff ? 2 : 1; }   // 0 on, 1 clock (dim), 2 off

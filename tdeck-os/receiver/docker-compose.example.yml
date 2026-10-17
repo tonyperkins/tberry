@@ -4,7 +4,7 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      # one key per device so each can be told apart; generate with: python3 -c "import secrets;print(secrets.token_urlsafe(32))"
+      # one key per device so each can be told apart; generate with: python3 -c "import secrets;print(secrets.token_urlsafe(24))"
       COV_API_KEYS: "CHANGE-ME-ALEX-KEY:alex,CHANGE-ME-TONY-KEY:tony"
     volumes:
       - ./data:/data

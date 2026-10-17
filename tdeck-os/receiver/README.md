@@ -9,7 +9,7 @@ everything it has received. Standard library Python, one SQLite file, no other d
 
 or with Docker: copy `docker-compose.example.yml` to `docker-compose.yml`, change the keys, `docker compose up -d`.
 
-Make keys with `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`. Give every device its own key
+Make keys with `python3 -c "import secrets;print(secrets.token_urlsafe(24))"` (32 characters; the device holds at most 39). Give every device its own key
 (`key:label`), and the label is how its rows are named when the device does not say.
 
 Put it behind TLS. The release firmware refuses `http://`, and positions travel in these requests.

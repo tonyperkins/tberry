@@ -8,9 +8,13 @@ and writes it in the format of ESP-IDF's x509 bundle: a 16-bit count, then for e
 the lengths of its subject and public key followed by their DER bytes, sorted by subject. The
 firmware passes it to WiFiClientSecure::setCACertBundle().
 
+Roots listed in tools/extra_roots/*.pem are added too. GlobalSign Root CA (R1) is there because
+Cloudflare's chain (GTS Root R4 cross-signed by it) needs it and Mozilla's list no longer carries it;
+it expires 2028-01-28.
+
 Roots expire and change, so regenerate this from time to time and ship it with an update.
 """
-import struct, sys
+import glob, os, struct, sys
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 
@@ -18,6 +22,8 @@ src = sys.argv[1] if len(sys.argv) > 1 else "/etc/ssl/certs/ca-certificates.crt"
 dst = sys.argv[2] if len(sys.argv) > 2 else "include/ca_bundle.h"
 
 pem = open(src, "rb").read()
+for extra in sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "extra_roots", "*.pem"))):
+    pem += b"\n" + open(extra, "rb").read()
 certs = []
 for block in pem.split(b"-----END CERTIFICATE-----"):
     if b"-----BEGIN CERTIFICATE-----" not in block:

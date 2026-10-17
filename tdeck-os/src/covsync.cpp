@@ -15,6 +15,7 @@ static constexpr int MAX_BATCHES = 40;           // per WiFi session: 2000 rows,
 static constexpr uint32_t RETRY_OK_MS = 10UL * 60000;
 static constexpr uint32_t RETRY_NOWIFI_MS = 5UL * 60000;
 static constexpr uint32_t RETRY_ERR_MS = 15UL * 60000;
+static constexpr uint32_t MIN_BLOCK = 45000;      // largest free block needed before WiFi + TLS start (the TLS buffers alone are ~34 KB)
 static constexpr uint32_t PARKED_FOR_MS = 90000;
 
 enum Phase { PH_IDLE, PH_CONNECTING, PH_READY, PH_POSTING, PH_POSTED, PH_FINISHING, PH_END };
@@ -49,9 +50,9 @@ bool covsync_busy() { return phase != PH_IDLE; }
 
 // ── provisioning: a file on the card with the address on line 1 and the key on line 2 ──
 void covsync_begin() {
-  char url[96], key[40];
+  char url[96], key[80];
   if (storage_read_line("/tdos/upload.conf", url, sizeof(url), 0) && storage_read_line("/tdos/upload.conf", key, sizeof(key), 1)
-      && url[0] && key[0]) {
+      && url[0] && key[0] && strlen(key) < sizeof(cfg().covKey)) {   // a key that does not fit would be cut short and rejected
     snprintf(cfg().covUrl, sizeof(cfg().covUrl), "%s", url);
     snprintf(cfg().covKey, sizeof(cfg().covKey), "%s", key);
     settings_changed();
@@ -169,6 +170,11 @@ static void syncTask(void*) {
       code = http.POST((uint8_t*)body, bodyLen);
       http.end();
     }
+    if (code <= 0) {
+      char tlsErr[100] = "";
+      if (tls) secure.lastError(tlsErr, sizeof(tlsErr));
+      Serial.printf("[cov] post failed: begin=%d code=%d (%s) tls='%s' maxalloc=%u\n", (int)ok, code, HTTPClient::errorToString(code).c_str(), tlsErr, (unsigned)ESP.getMaxAllocHeap());
+    }
     httpCode = code;
     phase = PH_POSTED;
     while (phase == PH_POSTED) delay(20);                // the main loop reads the answer, then sets READY or asks to finish
@@ -230,7 +236,7 @@ void covsync_tick(uint32_t now, bool parked, bool lowBattery) {
       uint32_t size = storage_coverage_size();
       if (size < sentOffset) { sentOffset = 0; storage_coverage_set_sent(0); }   // the log was cleared or rotated
       if (size <= sentOffset) { wantNow = false; nextAttemptMs = now + RETRY_OK_MS; return; }      // nothing to send: stay off WiFi
-      if (ESP.getMaxAllocHeap() < 60000) { wantNow = false; nextAttemptMs = now + RETRY_ERR_MS; lastResult = RES_MEMORY; lastEndMs = now; return; }
+      if (ESP.getMaxAllocHeap() < MIN_BLOCK) { Serial.printf("[cov] low memory: largest block %u\n", (unsigned)ESP.getMaxAllocHeap()); wantNow = false; nextAttemptMs = now + RETRY_ERR_MS; lastResult = RES_MEMORY; lastEndMs = now; return; }
       wantNow = false;
       batchesDone = 0;
       rowsSent = 0;
