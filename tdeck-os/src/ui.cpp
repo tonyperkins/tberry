@@ -1053,6 +1053,21 @@ static void leaveCb(lv_event_t*) {
   toast("Left the channel");
 }
 
+// Forget a contact's saved route so the next message floods. Says what actually happened.
+static bool resetPathFor(const uint8_t* key) {
+  uint32_t age;
+  int route = actions.routeInfo ? actions.routeInfo(key, &age) : -2;
+  if (route == -2) { toast("Not a saved contact"); return false; }
+  if (route == -1) { toast("No saved route: it already floods"); return false; }
+  if (!actions.resetRoute || !actions.resetRoute(key)) { toast("Could not reset the route"); return false; }
+  toast("Route reset: next message floods");
+  return true;
+}
+static void threadResetCb(lv_event_t*) {
+  const Conv* c = msgs_conv(curConv);
+  if (c) resetPathFor(c->key);
+}
+
 static void openThread(int conv) {
   const Conv* c = msgs_conv(conv);
   if (!c) return;
@@ -1072,6 +1087,11 @@ static void openThread(int conv) {
     leaveLbl = label(lv, "Leave", &font_tdos_12, MUTE);
     lv_obj_center(leaveLbl);
     lv_obj_add_event_cb(lv, leaveCb, LV_EVENT_CLICKED, nullptr);
+  } else if (!c->channel) {                                           // a person: their saved route can be dropped
+    lv_obj_t* rb = tappable(box(s, 84, 28, RAISE, 10));
+    lv_obj_set_pos(rb, 230, 26);
+    lv_obj_center(label(rb, "Reset path", &font_tdos_12, TEXT));
+    lv_obj_add_event_cb(rb, threadResetCb, LV_EVENT_CLICKED, nullptr);
   }
 
   thrBox = lv_obj_create(s);
@@ -2430,9 +2450,9 @@ static void nodeMapCb(lv_event_t*) {
 }
 // A saved route that has gone dead fails every message until a flood replaces it: let the owner drop it.
 static void nodeResetPathCb(lv_event_t*) {
-  if (!actions.resetRoute || !actions.resetRoute(detailNodeKey)) { toast("Not a saved contact"); return; }
+  if (!resetPathFor(detailNodeKey)) return;
   openNodeDetail(detailNodeKey);                   // show the route as gone
-  toast("Route reset: next message floods");
+  toast("Route reset: next message floods");        // the redraw dropped the first toast
 }
 static void nodeTestCb(lv_event_t*) {
   const NodeInfo* n = nodes_find(detailNodeKey);
