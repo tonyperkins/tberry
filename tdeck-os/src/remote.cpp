@@ -74,9 +74,9 @@ static void tap(int x, int y) {
   qPush(x, y, false);
   wantIdle = true;
 }
-static void swipe(int x1, int y1, int x2, int y2) {
+static void swipe(int x1, int y1, int x2, int y2, int steps = 6) {
   qPush(x1, y1, true); qPush(x1, y1, true);
-  for (int i = 1; i <= 6; i++) qPush(x1 + (x2 - x1) * i / 6, y1 + (y2 - y1) * i / 6, true);
+  for (int i = 1; i <= steps; i++) qPush(x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps, true);
   qPush(x2, y2, true);
   qPush(x2, y2, false);
   wantIdle = true;
@@ -106,7 +106,7 @@ static void startShot() {
 static void exec(char* s) {
   int a, b, c, d;
   if (sscanf(s, "tap %d %d", &a, &b) == 2) { tap(a, b); busy = true; return; }
-  if (sscanf(s, "swipe %d %d %d %d", &a, &b, &c, &d) == 4) { swipe(a, b, c, d); busy = true; return; }
+  { int n = 0; int got = sscanf(s, "swipe %d %d %d %d %d", &a, &b, &c, &d, &n); if (got >= 4) { swipe(a, b, c, d, got == 5 ? constrain(n, 1, 100) : 6); busy = true; return; } }
   if (!strncmp(s, "keys ", 5)) { for (const char* p = s + 5; *p; p++) ui_key(*p); busyUntil = millis() + 200; busy = true; return; }
   if (!strncmp(s, "key ", 4)) { ui_key(keyByName(s + 4)); busyUntil = millis() + 200; busy = true; return; }
   if (sscanf(s, "ball %d %d", &a, &b) == 2) { ui_nav(a, b); busyUntil = millis() + 200; busy = true; return; }

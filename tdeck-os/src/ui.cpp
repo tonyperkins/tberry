@@ -3169,13 +3169,18 @@ static void buildHome() {
 //   top edge, swipe down    quick panel
 // If the finger is lifted without a swipe it was an ordinary tap that happened near an edge, and
 // it is replayed to LVGL as a press and release at the point where it began.
-static constexpr int EDGE_LEFT = 20, EDGE_BOTTOM = 20, EDGE_TOP = 18;    // zone sizes in pixels
+static constexpr int EDGE_LEFT = 20, EDGE_BOTTOM = 14, EDGE_TOP = 18;    // zone sizes in pixels
 static constexpr int SWIPE_MIN = 36;                                     // travel needed to count
+// Home is a quick upward flick. A slower drag that starts down there is a scroll (a thumb starts low),
+// so after HOME_FLICK_MS it is handed to the list instead of becoming a swipe.
+static constexpr int HOME_MIN = 50;
+static constexpr uint32_t HOME_FLICK_MS = 400;
 
 static void touchRead(lv_indev_drv_t*, lv_indev_data_t* data) {
   static int16_t lastX = 0, lastY = 0;        // most recent position, reported to LVGL
   static bool down = false, edge = false, fired = false;
   static int16_t sx = 0, sy = 0;              // where the current touch began
+  static uint32_t startMs = 0;
   static int edgeKind = 0;                    // 1 left, 2 bottom, 3 top
   static uint8_t tapPhase = 0;                // replaying a tap: 1 = press, 2 = release
   static int16_t tapX = 0, tapY = 0;
@@ -3205,6 +3210,7 @@ static void touchRead(lv_indev_drv_t*, lv_indev_data_t* data) {
     if (!down) {                                          // a new touch begins
       down = true;
       sx = lastX; sy = lastY;
+      startMs = millis();
       fired = false;
       edgeKind = 0;
       if (mode == M_LOCK) { wake(); touchHeld = true; }
@@ -3215,7 +3221,10 @@ static void touchRead(lv_indev_drv_t*, lv_indev_data_t* data) {
     } else if (edge && !fired) {                          // moving: has it become a swipe?
       int dx = lastX - sx, dy = lastY - sy;
       if (edgeKind == 1 && dx >= SWIPE_MIN && abs(dy) < abs(dx)) { pendingGesture = G_BACK; fired = true; }
-      else if (edgeKind == 2 && dy <= -SWIPE_MIN && abs(dx) < abs(dy)) { pendingGesture = G_HOME; fired = true; }
+      else if (edgeKind == 2) {
+        if (millis() - startMs > HOME_FLICK_MS) edge = false;               // too slow for a flick: it is a scroll
+        else if (dy <= -HOME_MIN && abs(dx) * 2 < abs(dy)) { pendingGesture = G_HOME; fired = true; }
+      }
       else if (edgeKind == 3 && dy >= SWIPE_MIN && abs(dx) < abs(dy)) { pendingGesture = G_QUICK; fired = true; }
     }
   } else if (have && !nowDown && down) {                  // the finger was lifted
