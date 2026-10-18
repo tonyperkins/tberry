@@ -173,6 +173,9 @@ static bool openUrl(HTTPClient& http, WiFiClient*& client, const char* url) {
   return http.begin(*client, url);
 }
 
+static volatile bool installReq = false;
+static void doInstall();
+
 static void checkTask(void*) {
   cancelReq = false;
   memset(st.msg, 0, sizeof(st.msg));
@@ -218,6 +221,12 @@ static void checkTask(void*) {
     WiFi.mode(WIFI_OFF);
   } else {
     st.state = UP_AVAILABLE;                 // WiFi stays up for the install
+    installReq = false;
+    while (!installReq && !cancelReq) delay(50);
+    if (installReq && !cancelReq) { doInstall(); vTaskDelete(nullptr); return; }
+    WiFi.disconnect(true);                   // the user left the screen
+    WiFi.mode(WIFI_OFF);
+    st = {};
   }
   busy = false;
   vTaskDelete(nullptr);
@@ -227,23 +236,28 @@ void updater_check_start() {
   if (busy) return;
   busy = true;
   st = {};
-  xTaskCreatePinnedToCore(checkTask, "upcheck", 12288, nullptr, 1, nullptr, 0);
+  if (xTaskCreatePinnedToCore(checkTask, "upcheck", 12288, nullptr, 1, nullptr, 0) != pdPASS) {
+    snprintf(st.msg, sizeof(st.msg), "Not enough memory");
+    st.state = UP_ERROR;
+    busy = false;
+  }
 }
 
 // ── install ──────────────────────────────────────────────────────
-static void installTask(void*) {
-  cancelReq = false;
-  if (!allowedUrl(man.url)) { fail("Download address not allowed"); vTaskDelete(nullptr); return; }
+// Runs inside the check task: the device has only ~34 KB of heap free while WiFi is up, too little to start a second 12 KB task.
+static void doInstall() {
+  Serial.println("[upd] installing");
+  if (!allowedUrl(man.url)) { fail("Download address not allowed"); return; }
   HTTPClient http;
   WiFiClient* client = nullptr;
-  if (!openUrl(http, client, man.url)) { fail("Could not start the download"); vTaskDelete(nullptr); return; }
+  if (!openUrl(http, client, man.url)) { fail("Could not start the download"); return; }
   st.state = UP_DOWNLOADING;
   st.done = 0;
   int code = http.GET();
-  if (code != 200) { http.end(); fail("Download failed"); vTaskDelete(nullptr); return; }
+  if (code != 200) { http.end(); fail("Download failed"); return; }
   int len = http.getSize();
-  if (len > 0 && (uint32_t)len != man.size) { http.end(); fail("Size does not match"); vTaskDelete(nullptr); return; }
-  if (!Update.begin(man.size, U_FLASH)) { http.end(); fail("No room for the update"); vTaskDelete(nullptr); return; }
+  if (len > 0 && (uint32_t)len != man.size) { http.end(); fail("Size does not match"); return; }
+  if (!Update.begin(man.size, U_FLASH)) { http.end(); fail("No room for the update"); return; }
 
   mbedtls_sha256_context sha;
   mbedtls_sha256_init(&sha);
@@ -273,7 +287,7 @@ static void installTask(void*) {
   uint8_t digest[32];
   mbedtls_sha256_finish(&sha, digest);
   mbedtls_sha256_free(&sha);
-  if (!ok) { Update.abort(); st.state = UP_ERROR; WiFi.disconnect(true); WiFi.mode(WIFI_OFF); busy = false; vTaskDelete(nullptr); return; }
+  if (!ok) { Update.abort(); st.state = UP_ERROR; WiFi.disconnect(true); WiFi.mode(WIFI_OFF); busy = false; return; }
 
   st.state = UP_VERIFYING;
   uint8_t msg[9 + 4 + 4 + 32];
@@ -281,20 +295,19 @@ static void installTask(void*) {
   memcpy(msg + 9, &man.build, 4);
   memcpy(msg + 13, &man.size, 4);
   memcpy(msg + 17, digest, 32);
-  if (memcmp(digest, man.sha256, 32) != 0) { Update.abort(); fail("Checksum does not match"); vTaskDelete(nullptr); return; }
-  if (!ed25519_verify(man.sig, msg, sizeof(msg), UPDATE_PUBLIC_KEY)) { Update.abort(); fail("Signature is not valid"); vTaskDelete(nullptr); return; }
-  if (!Update.end(false) || !Update.isFinished()) { fail("Could not finish the update"); vTaskDelete(nullptr); return; }
+  if (memcmp(digest, man.sha256, 32) != 0) { Update.abort(); fail("Checksum does not match"); return; }
+  if (!ed25519_verify(man.sig, msg, sizeof(msg), UPDATE_PUBLIC_KEY)) { Update.abort(); fail("Signature is not valid"); return; }
+  if (!Update.end(false) || !Update.isFinished()) { fail("Could not finish the update"); return; }
   st.state = UP_DONE;                         // the UI restarts the device
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   busy = false;
-  vTaskDelete(nullptr);
 }
 
 void updater_install_start() {
-  if (busy || st.state != UP_AVAILABLE) return;
-  busy = true;
-  xTaskCreatePinnedToCore(installTask, "upinstall", 12288, nullptr, 1, nullptr, 0);
+  Serial.printf("[upd] install requested, state=%d\n", (int)st.state);
+  if (st.state != UP_AVAILABLE) return;
+  installReq = true;
 }
 
 void updater_stop() {

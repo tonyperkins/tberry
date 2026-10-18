@@ -1694,6 +1694,7 @@ static void openWifiScan() {
 
 static void updBtnCb(lv_event_t*) {
   const UpStatus& u = updater_status();
+  Serial.printf("[upd] button: state=%d ssid=%d\n", (int)u.state, (int)cfg().wifiSsid[0]);
   if (!cfg().wifiSsid[0]) { openWifiScan(); return; }
   if (u.state == UP_AVAILABLE) updater_install_start();
   else if (u.state == UP_DONE) ESP.restart();
