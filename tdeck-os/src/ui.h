@@ -67,5 +67,7 @@ struct UiActions {
   void (*leaveChannel)(int conv);          // leave a hashtag channel and forget its messages
   int (*probeNow)();                       // coverage: send a probe to the target now (0 sent, 1 no GPS, 2 no target, 3 failed)
   bool (*uploadNow)();                     // coverage: upload the log now if the settings allow it
+  int (*routeInfo)(const uint8_t* key4, uint32_t* ageSec);   // saved route: hops, -1 none (floods), -2 not a contact; age UINT32_MAX = unknown
+  bool (*resetRoute)(const uint8_t* key4);  // forget a contact's route so the next message floods
 };
 void ui_set_actions(const UiActions& a);

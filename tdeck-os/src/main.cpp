@@ -110,10 +110,26 @@ static bool covPos(int32_t& latE6, int32_t& lonE6);      // a fresh, trusted GPS
 // ── The mesh node ────────────────────────────────────────────────
 class DeckMesh : public BaseChatMesh {
   fs::FS* _fs = nullptr;
-  struct Pending { uint32_t ack; int conv; uint32_t msgId; uint32_t sentMs; bool test; };
+  // A DM waiting for its ACK. The text and timestamp are kept so it can be sent again by flood.
+  struct Pending {
+    uint32_t ack, firstAck;              // firstAck: the routed copy's, which can still arrive after a retry
+    int conv; uint32_t msgId; uint32_t sentMs; uint32_t ts;
+    bool test, direct, retried, timedOut;
+    uint8_t key[4];
+    char text[MAX_TEXT_LEN + 1];
+  };
   static constexpr int MAX_PENDING = 6;
   static constexpr uint32_t ACK_WAIT_MS = 60000;   // longer than MeshCore's own timeout for a routed message
   Pending _pending[MAX_PENDING] = {};
+  uint32_t _lastAck = 0;                 // ACK of the latest DM: the one MeshCore's send timer is for
+  // When each contact's route was last learned, or proven by an ACK (millis, RAM only). On the move a
+  // route goes stale within minutes, and an old one costs a failed send plus a retry, so a route older
+  // than this is dropped before sending and the message floods. A route loaded at boot has no time and
+  // counts as old.
+  static constexpr uint32_t PATH_MAX_AGE_MS = 10UL * 60 * 1000;
+  struct PathAge { uint8_t key[4]; uint32_t ms; };
+  PathAge _pathAge[MAX_CONTACTS] = {};
+  int _pathAgeN = 0;
   int _pubConv = -1;
   ChannelDetails* _public = nullptr;
   // Hashtag channels the owner has joined (channel slot 0 is Public). The key comes from the name:
@@ -203,18 +219,49 @@ protected:
   }
   void onContactPathUpdated(const ContactInfo& contact) override {
     logf("path updated: %s len=%d\n", contact.name, (int)contact.out_path_len);
+    pathTouch(contact.id.pub_key);
     _dirty = true;
+  }
+
+  void pathTouch(const uint8_t* key) {
+    int oldest = 0;
+    for (int i = 0; i < _pathAgeN; i++) {
+      if (memcmp(_pathAge[i].key, key, 4) == 0) { _pathAge[i].ms = millis(); return; }
+      if ((int32_t)(_pathAge[i].ms - _pathAge[oldest].ms) < 0) oldest = i;
+    }
+    int i = _pathAgeN < MAX_CONTACTS ? _pathAgeN++ : oldest;
+    memcpy(_pathAge[i].key, key, 4);
+    _pathAge[i].ms = millis();
+  }
+  // Milliseconds since the contact's route was learned or confirmed; UINT32_MAX if never.
+  uint32_t pathAge(const uint8_t* key) const {
+    for (int i = 0; i < _pathAgeN; i++) if (memcmp(_pathAge[i].key, key, 4) == 0) return millis() - _pathAge[i].ms;
+    return UINT32_MAX;
+  }
+  // Forget a route: the next message to this contact floods, and the reply brings a fresh route.
+  void resetPath(ContactInfo& ci) {
+    resetPathTo(ci);
+    _dirty = true;                         // the contacts file keeps routes across restarts
+  }
+  // Before a DM: drop a route that is too old to trust.
+  void freshenPath(ContactInfo& ci) {
+    if (ci.out_path_len == OUT_PATH_UNKNOWN || pathAge(ci.id.pub_key) < PATH_MAX_AGE_MS) return;
+    logf("path stale: %s, flooding\n", ci.name);
+    chatPush("  old route to %s, flooding", ci.name);
+    resetPath(ci);
   }
   ContactInfo* processAck(const uint8_t* data) override {
     if (_probe.ack && memcmp(data, &_probe.ack, 4) == 0) finishProbe(true);
     for (auto& p : _pending) {
-      if (p.ack && memcmp(data, &p.ack, 4) == 0) {
+      bool late = p.firstAck && memcmp(data, &p.firstAck, 4) == 0;   // the routed copy got there after all
+      if (p.ack && (memcmp(data, &p.ack, 4) == 0 || late)) {
+        if (p.direct && !late) pathTouch(p.key);   // the route works: it is not stale yet
         uint32_t rtt = millis() - p.sentMs;
         msgs_set_status(p.conv, p.msgId, MS_DELIVERED, (uint16_t)min<uint32_t>(65535, max<uint32_t>(1, rtt / 100)));
         chatPush("  delivered (%lu ms)", (unsigned long)rtt);
         if (p.test) finishTest(p.conv, true, rtt);
         else audio_play(SND_DELIVERED);
-        p.ack = 0;                       // the same ACK can arrive more than once
+        p.ack = p.firstAck = 0;          // the same ACK can arrive more than once
         break;
       }
     }
@@ -368,16 +415,45 @@ protected:
   }
 
   void onSendTimeout() override {
-    // MeshCore reports one timeout for the most recent send: fail the oldest message still waiting.
-    Pending* oldest = nullptr;
-    for (auto& p : _pending) if (p.ack && (!oldest || p.sentMs < oldest->sentMs)) oldest = &p;
-    if (oldest) {
-      msgs_set_status(oldest->conv, oldest->msgId, MS_FAILED);
-      if (oldest->test) finishTest(oldest->conv, false, millis() - oldest->sentMs);
-      audio_play(SND_FAILED);
-      oldest->ack = 0;
+    // MeshCore times only the most recent send, and processAck() never cancels that timer, so it also
+    // fires after a delivered message: act only if that very message is still waiting. Handled in
+    // tick(): MeshCore clears its timer after this returns, which would drop a retry's timer.
+    for (auto& p : _pending) if (p.ack && p.ack == _lastAck) { p.timedOut = true; return; }
+  }
+
+  // A DM got no ACK in time. If it went on a saved route, that route is probably dead (we or a
+  // repeater moved): forget it, unless it was relearned since, and send the message once more. With
+  // the route gone that copy floods, and the recipient's reply carries a fresh route back. One retry
+  // only; a flood that fails, or a range test (which measures that one packet), is reported as it is.
+  void noAck(Pending& p, bool loud) {
+    ContactInfo* ci = lookupContactByPubKey(p.key, 4);
+    if (p.direct && ci && ci->out_path_len != OUT_PATH_UNKNOWN && pathAge(p.key) >= millis() - p.sentMs) {
+      logf("no ack on route to %s: path reset\n", ci->name);
+      resetPath(*ci);
     }
-    chatPush("  no ack (timed out)");
+    if (p.direct && !p.retried && !p.test && ci) {
+      uint32_t ack = 0, est = 0;
+      // Attempt 1 changes the packet hash, so repeaters that relayed the first copy pass this one too,
+      // and gives it an ACK of its own. Same timestamp: it is the same message.
+      int r = sendMessage(*ci, p.ts, 1, p.text, ack, est);
+      if (r != MSG_SEND_FAILED && ack) {
+        p.firstAck = p.ack;
+        p.ack = _lastAck = ack;
+        p.sentMs = millis();
+        p.direct = (r == MSG_SEND_SENT_DIRECT);
+        p.retried = true;
+        p.timedOut = false;
+        chatPush(p.direct ? "  no ack, retrying on new route" : "  no ack, retrying via flood");
+        return;
+      }
+    }
+    msgs_set_status(p.conv, p.msgId, MS_FAILED);
+    if (p.test) finishTest(p.conv, false, millis() - p.sentMs);
+    p.ack = p.firstAck = 0;
+    if (loud) {
+      audio_play(SND_FAILED);
+      chatPush("  no ack (timed out)");
+    }
   }
 
 public:
@@ -502,14 +578,8 @@ public:
   // Writing the contact file takes ~0.5 s of flash time, so batch it instead of saving per advert.
   void tick() {
     // MeshCore keeps a single timeout for the latest send, so earlier messages that never get an
-    // ACK would hold their slot for ever: expire them here.
-    for (auto& p : _pending) {
-      if (p.ack && millis() - p.sentMs > ACK_WAIT_MS) {
-        msgs_set_status(p.conv, p.msgId, MS_FAILED);
-        if (p.test) finishTest(p.conv, false, millis() - p.sentMs);
-        p.ack = 0;
-      }
-    }
+    // ACK would hold their slot for ever: expire them here, and handle the timer's own timeouts.
+    for (auto& p : _pending) if (p.ack && (p.timedOut || millis() - p.sentMs > ACK_WAIT_MS)) noAck(p, p.timedOut);
     if (_probe.ack && millis() - _probe.sentMs > PROBE_WAIT_MS) finishProbe(false);
     if (_dirty && millis() - _lastSaveMs > 15000) {
       saveContacts();
@@ -543,11 +613,13 @@ public:
     if (_probe.ack) return false;                    // one at a time
     ContactInfo* ci = lookupContactByPubKey(key4, 4);
     if (!ci) return false;
+    freshenPath(*ci);
     char text[48];
     snprintf(text, sizeof(text), "Coverage probe %.4f,%.4f", la / 1e6, lo / 1e6);
     uint32_t ack = 0, est = 0;
     int r = sendMessage(*ci, getRTCClock()->getCurrentTime(), 0, text, ack, est);
     if (r == MSG_SEND_FAILED || !ack) return false;
+    _lastAck = ack;                                  // the send timer is now the probe's
     _probe = { ack, millis(), la, lo, {} };
     memcpy(_probe.key, key4, 4);
     return true;
@@ -590,15 +662,41 @@ public:
     }
     ContactInfo* ci = lookupContactByPubKey(c->key, 4);
     if (!ci) { msgs_set_status(conv, id, MS_FAILED); return false; }
+    freshenPath(*ci);
     uint32_t ack = 0, est = 0;
     int r = sendMessage(*ci, now, 0, text, ack, est);
     if (r == MSG_SEND_FAILED) { msgs_set_status(conv, id, MS_FAILED); return false; }
+    _lastAck = ack;
     msgs_set_status(conv, id, MS_SENT);
     audio_play(SND_SENT);
     for (auto& p : _pending) {
-      if (!p.ack) { p = { ack, conv, id, millis(), isTest }; return true; }
+      if (p.ack) continue;
+      p = {};
+      p.ack = ack; p.conv = conv; p.msgId = id; p.sentMs = millis(); p.ts = now;
+      p.test = isTest; p.direct = (r == MSG_SEND_SENT_DIRECT);
+      memcpy(p.key, c->key, 4);
+      snprintf(p.text, sizeof(p.text), "%s", text);
+      return true;
     }
     return true;                          // table full: delivered status just won't be tracked
+  }
+
+  // For the node sheet: the saved route's hop count, -1 if none (messages flood), -2 if not a contact.
+  int routeInfo(const uint8_t key4[4], uint32_t* ageSec) {
+    ContactInfo* ci = lookupContactByPubKey(key4, 4);
+    if (!ci) return -2;
+    uint32_t a = pathAge(key4);
+    if (ageSec) *ageSec = a == UINT32_MAX ? UINT32_MAX : a / 1000;
+    return ci->out_path_len == OUT_PATH_UNKNOWN ? -1 : (ci->out_path_len & 63);
+  }
+  // The owner's "Reset path": saved at once, it is a deliberate change.
+  bool resetRoute(const uint8_t key4[4]) {
+    ContactInfo* ci = lookupContactByPubKey(key4, 4);
+    if (!ci) return false;
+    resetPath(*ci);
+    saveContacts();
+    chatPush("  route to %s reset", ci->name);
+    return true;
   }
 };
 
@@ -1013,6 +1111,8 @@ static const UiActions uiActions = {
   /* leaveChannel */ [](int conv) { if (theMesh) theMesh->leaveChannel(conv); },
   /* probeNow     */ []() { return probeNow(); },
   /* uploadNow    */ []() { return covsync_now(); },
+  /* routeInfo    */ [](const uint8_t* k, uint32_t* age) { return theMesh ? theMesh->routeInfo(k, age) : -2; },
+  /* resetRoute   */ [](const uint8_t* k) { return theMesh && theMesh->resetRoute(k); },
 };
 
 void setup() {

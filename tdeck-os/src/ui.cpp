@@ -2427,6 +2427,12 @@ static void nodeMapCb(lv_event_t*) {
   if (!n->lat && !n->lon) { toast("No position shared"); return; }
   openMapFocus(n->lat / 1e6, n->lon / 1e6, n->name);
 }
+// A saved route that has gone dead fails every message until a flood replaces it: let the owner drop it.
+static void nodeResetPathCb(lv_event_t*) {
+  if (!actions.resetRoute || !actions.resetRoute(detailNodeKey)) { toast("Not a saved contact"); return; }
+  openNodeDetail(detailNodeKey);                   // show the route as gone
+  toast("Route reset: next message floods");
+}
 static void nodeTestCb(lv_event_t*) {
   const NodeInfo* n = nodes_find(detailNodeKey);
   if (!n) return;
@@ -2473,11 +2479,24 @@ static void openNodeDetail(const uint8_t key4[4]) {
   if (strcmp(age, "-") == 0) snprintf(heard, sizeof(heard), "Not heard since restart");
   else if (strcmp(age, "now") == 0) snprintf(heard, sizeof(heard), "Heard just now");
   else snprintf(heard, sizeof(heard), "Heard %s ago", age);
-  snprintf(b, sizeof(b), "%s, %s\n%s%s\n%s\nKey %02x%02x%02x%02x", typeName(n->type), hop,
-           heard, sig, dist, n->key[0], n->key[1], n->key[2], n->key[3]);
+  // The route messages take, which is not the path the last packet came by.
+  uint32_t routeAge = UINT32_MAX;
+  int route = actions.routeInfo ? actions.routeInfo(n->key, &routeAge) : -2;
+  char rt[32] = "";
+  if (route == -1) snprintf(rt, sizeof(rt), ", route: flood");
+  else if (route >= 0 && routeAge == UINT32_MAX) snprintf(rt, sizeof(rt), ", route: %d hop%s, old", route, route == 1 ? "" : "s");
+  else if (route >= 0) snprintf(rt, sizeof(rt), ", route: %d hop%s, %um", route, route == 1 ? "" : "s", (unsigned)(routeAge / 60));
+  snprintf(b, sizeof(b), "%s, %s\n%s%s\n%s\nKey %02x%02x%02x%02x%s", typeName(n->type), hop,
+           heard, sig, dist, n->key[0], n->key[1], n->key[2], n->key[3], rt);
   lv_obj_t* info = label(s, b, &font_tdos_14, MUTE);
   lv_obj_set_width(info, 288);
   lv_obj_set_pos(info, 16, 94);
+  if (route >= -1) {                                // a contact: its route can be reset
+    lv_obj_t* rb = tappable(box(s, 80, 28, RAISE, 10));
+    lv_obj_set_pos(rb, 234, 26);
+    lv_obj_center(label(rb, "Reset path", &font_tdos_12, route >= 0 ? TEXT : MUTE));
+    lv_obj_add_event_cb(rb, nodeResetPathCb, LV_EVENT_CLICKED, nullptr);
+  }
 
   bool person = n->type == 1, pos = n->lat || n->lon;
   struct Btn { const char* text; bool ok; lv_event_cb_t cb; } btns[3] = {
