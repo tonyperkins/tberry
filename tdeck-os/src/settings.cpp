@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 static constexpr uint32_t MAGIC = 0x53444F54;   // "TODS"
-static constexpr uint16_t VERSION = 13;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates, 9 -> 10: key backlight, 10 -> 11: coverage, 11 -> 12: coverage upload, 12 -> 13: per-conversation sound
+static constexpr uint16_t VERSION = 14;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates, 9 -> 10: key backlight, 10 -> 11: coverage, 11 -> 12: coverage upload, 12 -> 13: per-conversation sound, 13 -> 14: path hash size
 static constexpr const char* PATH = "/settings";
 
 static Settings s;
@@ -34,6 +34,7 @@ static void applyDefaults() {
   s.covDisc = 2;
   s.covDm = 3;
   s.covUpload = 1;
+  s.pathBytes = 2;
 }
 
 void settings_begin(fs::FS& fs) {
@@ -58,8 +59,9 @@ void settings_begin(fs::FS& fs) {
     else if (tmp.version == 7) { tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == 8) { tmp.kbLight = s.kbLight; tmp.version = VERSION; s = tmp; }   // WiFi fields stay empty
     else if (tmp.version == 9) { tmp.kbLight = s.kbLight; tmp.version = VERSION; s = tmp; }  // the new byte was padding: zero
-    else if (tmp.version == 10 || tmp.version == 11 || tmp.version == 12) { tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 10 || tmp.version == 11 || tmp.version == 12 || tmp.version == 13) { tmp.version = VERSION; s = tmp; }
     else if (tmp.version == VERSION) s = tmp;
+    if (fileVersion < 14 && s.version == VERSION) s.pathBytes = defaults.pathBytes;   // new byte was padding: zero
     if (fileVersion < 12 && s.version == VERSION) {            // v12 fields: no address or key, upload on
       s.covUpload = defaults.covUpload; memset(s.covUrl, 0, sizeof(s.covUrl)); memset(s.covKey, 0, sizeof(s.covKey));
     }

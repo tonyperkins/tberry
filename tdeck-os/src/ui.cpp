@@ -1261,7 +1261,7 @@ static const float bwList[] = { 7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.7f, 62.5f,
 static constexpr int BW_N = 10;
 
 enum { ROW_NAME, ROW_TZ, ROW_DST, ROW_GPS, ROW_BRIGHT, ROW_VOLUME, ROW_CHSOUND, ROW_TIMEOUT, ROW_SCREENOFF, ROW_WIFI, ROW_UPDATE, ROW_RADIO, ROW_BATT, ROW_ABOUT, ROW_ADV };
-enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_UPON, AD_UPURL, AD_UPKEY, AD_UPNOW, AD_UPSTAT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO, AD_PG_RADIO, AD_PG_COV, AD_PG_UP, AD_PG_DEV };
+enum { AD_PRESET, AD_FREQ, AD_BW, AD_SF, AD_CR, AD_PWR, AD_PATHHASH, AD_ADVERT, AD_COV, AD_COVDISC, AD_COVDM, AD_COVTARGET, AD_COVNOW, AD_COVCLEAR, AD_UPON, AD_UPURL, AD_UPKEY, AD_UPNOW, AD_UPSTAT, AD_PIN, AD_SETUP, AD_RESET, AD_INFO, AD_PG_RADIO, AD_PG_COV, AD_PG_UP, AD_PG_DEV };
 
 void ui_set_actions(const UiActions& a) { actions = a; }
 
@@ -1892,6 +1892,7 @@ static void pickCovTarget(int i) {
   if (k) { memcpy(cfg().covTarget, k->key, 4); cfg().covTargetSet = 1; settings_changed(); }
   openAdvanced();
 }
+static void pickPathHash(int i) { cfg().pathBytes = (uint8_t)(1 + constrain(i, 0, 2)); settings_changed(); openAdvanced(); }
 static void pickPwr(int i) { cfg().txPower = 2 + constrain(i, 0, 20); settings_changed(); if (actions.applyRadio) actions.applyRadio(); openAdvanced(); }
 
 // ── Settings screen ──────────────────────────────────────────────
@@ -2057,6 +2058,8 @@ static void fillAdvanced() {
   addRow("Coding rate", b, AD_CR, K_NAV);
   snprintf(b, sizeof(b), "%d dBm", c.txPower);
   addRow("TX power", b, AD_PWR, K_NAV);
+  snprintf(b, sizeof(b), "%d byte%s", constrain((int)c.pathBytes, 1, 3), c.pathBytes == 1 ? "" : "s");
+  addRow("Path hash size", b, AD_PATHHASH, K_NAV);
   addRow("Send advert", "Send", AD_ADVERT, K_BUTTON);
   }
   if (advPage == 2) {
@@ -2211,6 +2214,12 @@ static void advAct(int id) {
     case AD_COVDISC:
       for (int i = 0; i < COV_DISC_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", COV_DISC_NAMES[i]);
       openPicker("Discovery probe", COV_DISC_N, constrain((int)c.covDisc, 0, COV_DISC_N - 1), pickCovDisc, M_ADV);
+      return;
+    case AD_PATHHASH:
+      snprintf(pickBuf[0], sizeof(pickBuf[0]), "1 byte (older repeaters)");
+      snprintf(pickBuf[1], sizeof(pickBuf[1]), "2 bytes (default)");
+      snprintf(pickBuf[2], sizeof(pickBuf[2]), "3 bytes");
+      openPicker("Path hash size", 3, constrain((int)c.pathBytes, 1, 3) - 1, pickPathHash, M_ADV);
       return;
     case AD_COVDM:
       for (int i = 0; i < COV_DM_N; i++) snprintf(pickBuf[i], sizeof(pickBuf[i]), "%s", COV_DM_NAMES[i]);

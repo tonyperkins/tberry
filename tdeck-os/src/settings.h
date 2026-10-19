@@ -40,6 +40,7 @@ struct Settings {
   uint8_t soundN;          // per-conversation sound overrides in use
   uint8_t soundKey[SOUND_MAX][4];    // the conversation (first bytes of its key)
   uint8_t soundState[SOUND_MAX];     // 1 silent, 2 chime on every message
+  uint8_t pathBytes;       // bytes per repeater in the path of a flood we send: 1, 2 (default) or 3
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults

@@ -643,9 +643,15 @@ public:
     return false;
   }
 
+  // Bytes per repeater in the path of every flood we send (Settings > Advanced > Radio). Repeaters
+  // copy the size they find in the packet, so this only needs repeaters on firmware 1.14 or later.
+  uint8_t pathBytes() const { return (uint8_t)constrain((int)cfg().pathBytes, 1, 3); }
+  void sendFloodScoped(const ContactInfo&, mesh::Packet* pkt, uint32_t delayMs = 0) override { sendFlood(pkt, delayMs, pathBytes()); }
+  void sendFloodScoped(const mesh::GroupChannel&, mesh::Packet* pkt, uint32_t delayMs = 0) override { sendFlood(pkt, delayMs, pathBytes()); }
+
   void advertise(int delayMs) {
     auto pkt = createSelfAdvert(name, 0.0, 0.0);
-    if (pkt) sendFlood(pkt, delayMs);
+    if (pkt) sendFlood(pkt, delayMs, pathBytes());
   }
 
   // Sends `text` into a conversation and tracks its delivery. The outgoing message is stored
