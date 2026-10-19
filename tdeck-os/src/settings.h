@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <FS.h>
 
+static constexpr int SOUND_MAX = 16;
+
 struct Settings {
   uint32_t magic;          // identifies a valid settings file
   uint16_t version;
@@ -35,6 +37,9 @@ struct Settings {
   uint8_t covUpload;       // 1 = upload the coverage log over WiFi when at home (needs an address and key)
   char covUrl[96];         // receiver address, https://host/api/coverage
   char covKey[40];         // key sent as X-API-Key
+  uint8_t soundN;          // per-conversation sound overrides in use
+  uint8_t soundKey[SOUND_MAX][4];    // the conversation (first bytes of its key)
+  uint8_t soundState[SOUND_MAX];     // 1 silent, 2 chime on every message
 };
 
 void settings_begin(fs::FS& fs);       // loads, or applies defaults
@@ -42,3 +47,8 @@ Settings& cfg();
 void settings_changed();               // mark dirty; saved shortly after
 void settings_tick();                  // call from the main loop
 void settings_defaults(bool keepName); // restore factory values
+
+// Per-conversation sound: 0 follows the defaults (direct messages chime, channels follow the channel
+// policy), 1 silent, 2 chime on every message.
+uint8_t sound_override(const uint8_t key[4]);
+bool sound_set(const uint8_t key[4], uint8_t state);   // false when the list is full

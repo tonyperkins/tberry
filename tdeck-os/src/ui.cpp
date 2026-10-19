@@ -258,6 +258,7 @@ static void openNodes(bool keepFilter = false);
 static void openStatus();
 static void openConvs();
 static void openThread(int conv);
+static bool chatSilent(const Conv* c);
 static void goBack();
 
 static void setSel(int i) {
@@ -494,6 +495,10 @@ static void fillConvs() {
     lv_obj_set_pos(p, 46, 25);
     lv_obj_set_width(p, 200);
     lv_label_set_long_mode(p, LV_LABEL_LONG_CLIP);
+    if (chatSilent(c)) {                                        // a silenced chat
+      lv_obj_t* m = label(row, LV_SYMBOL_MUTE, &font_tdos_12, MUTE);
+      lv_obj_set_pos(m, c->unread ? 258 : 290, 15);
+    }
     if (c->unread) {
       lv_obj_t* d = box(row, 22, 22, ACCENT, 11);
       lv_obj_set_pos(d, 282, 12);
@@ -1068,6 +1073,26 @@ static void threadResetCb(lv_event_t*) {
   if (c) resetPathFor(c->key);
 }
 
+// Per-chat sound: the effective state decides the icon, the override cycles on tap.
+static lv_obj_t* bellLbl = nullptr;
+static bool chatSilent(const Conv* c) {
+  uint8_t ov = sound_override(c->key);
+  return ov == 1 || (ov == 0 && c->channel && cfg().channelSound == 0);
+}
+static void threadBellCb(lv_event_t*) {
+  const Conv* c = msgs_conv(curConv);
+  if (!c) return;
+  uint8_t ov = sound_override(c->key), next;
+  if (c->channel) next = ov == 0 ? 2 : (ov == 2 ? 1 : 0);   // default, every message, silent
+  else            next = ov == 1 ? 0 : 1;                   // chime, silent
+  if (!sound_set(c->key, next)) { toast("Too many chats with their own sound"); return; }
+  if (bellLbl) lv_label_set_text(bellLbl, chatSilent(c) ? LV_SYMBOL_MUTE : LV_SYMBOL_BELL);
+  if (next == 2) toast("Chimes on every message");
+  else if (next == 1) toast("Silent");
+  else if (!c->channel) toast("Chimes");
+  else toast(cfg().channelSound == 0 ? "Default: silent" : cfg().channelSound == 1 ? "Default: chimes on mentions" : "Default: every message");
+}
+
 static void openThread(int conv) {
   const Conv* c = msgs_conv(conv);
   if (!c) return;
@@ -1092,6 +1117,14 @@ static void openThread(int conv) {
     lv_obj_set_pos(rb, 230, 26);
     lv_obj_center(label(rb, "Reset path", &font_tdos_12, TEXT));
     lv_obj_add_event_cb(rb, threadResetCb, LV_EVENT_CLICKED, nullptr);
+  }
+  {                                                                   // the bell: this chat's sound
+    int bx = !c->channel ? 196 : (memcmp(c->key, CHANNEL_KEY, 4) != 0 ? 204 : 274);
+    lv_obj_t* bb = tappable(box(s, 30, 28, RAISE, 10));
+    lv_obj_set_pos(bb, bx, 26);
+    bellLbl = label(bb, chatSilent(c) ? LV_SYMBOL_MUTE : LV_SYMBOL_BELL, &font_tdos_14, TEXT);
+    lv_obj_center(bellLbl);
+    lv_obj_add_event_cb(bb, threadBellCb, LV_EVENT_CLICKED, nullptr);
   }
 
   thrBox = lv_obj_create(s);

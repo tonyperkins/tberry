@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 static constexpr uint32_t MAGIC = 0x53444F54;   // "TODS"
-static constexpr uint16_t VERSION = 12;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates, 9 -> 10: key backlight, 10 -> 11: coverage, 11 -> 12: coverage upload
+static constexpr uint16_t VERSION = 13;     // 2 -> 3: volume, 3 -> 4: channel sound policy, 4 -> 5: GPS on/off, 5 -> 6: screen timeout, 6 -> 7: first-boot setup, 7 -> 8: screen off, 8 -> 9: WiFi for updates, 9 -> 10: key backlight, 10 -> 11: coverage, 11 -> 12: coverage upload, 12 -> 13: per-conversation sound
 static constexpr const char* PATH = "/settings";
 
 static Settings s;
@@ -58,7 +58,7 @@ void settings_begin(fs::FS& fs) {
     else if (tmp.version == 7) { tmp.screenOff = s.screenOff; tmp.version = VERSION; s = tmp; }
     else if (tmp.version == 8) { tmp.kbLight = s.kbLight; tmp.version = VERSION; s = tmp; }   // WiFi fields stay empty
     else if (tmp.version == 9) { tmp.kbLight = s.kbLight; tmp.version = VERSION; s = tmp; }  // the new byte was padding: zero
-    else if (tmp.version == 10 || tmp.version == 11) { tmp.version = VERSION; s = tmp; }
+    else if (tmp.version == 10 || tmp.version == 11 || tmp.version == 12) { tmp.version = VERSION; s = tmp; }
     else if (tmp.version == VERSION) s = tmp;
     if (fileVersion < 12 && s.version == VERSION) {            // v12 fields: no address or key, upload on
       s.covUpload = defaults.covUpload; memset(s.covUrl, 0, sizeof(s.covUrl)); memset(s.covKey, 0, sizeof(s.covKey));
@@ -94,4 +94,29 @@ void settings_defaults(bool keepName) {
   if (keepName) memcpy(s.name, name, sizeof(name));
   s.setupDone = 1;                        // a restore never sends the owner back through setup
   settings_changed();
+}
+
+uint8_t sound_override(const uint8_t key[4]) {
+  for (int i = 0; i < s.soundN && i < SOUND_MAX; i++)
+    if (memcmp(s.soundKey[i], key, 4) == 0) return s.soundState[i];
+  return 0;
+}
+
+bool sound_set(const uint8_t key[4], uint8_t state) {
+  for (int i = 0; i < s.soundN && i < SOUND_MAX; i++) {
+    if (memcmp(s.soundKey[i], key, 4) != 0) continue;
+    if (state == 0) {                                   // back to the default: drop the entry
+      s.soundN--;
+      memcpy(s.soundKey[i], s.soundKey[s.soundN], 4);
+      s.soundState[i] = s.soundState[s.soundN];
+    } else s.soundState[i] = state;
+    settings_changed();
+    return true;
+  }
+  if (state == 0) return true;
+  if (s.soundN >= SOUND_MAX) return false;
+  memcpy(s.soundKey[s.soundN], key, 4);
+  s.soundState[s.soundN++] = state;
+  settings_changed();
+  return true;
 }

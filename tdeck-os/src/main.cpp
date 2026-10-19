@@ -275,7 +275,7 @@ protected:
     MsgInfo info = radioInfo(pkt, ts);
     strncpy(info.sender, from.name, sizeof(info.sender) - 1);
     msgs_add_info(conv, false, text, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
-    audio_play(SND_RECEIVE);                // a direct message always chimes
+    if (sound_override(from.id.pub_key) != 1) audio_play(SND_RECEIVE);   // a direct message chimes unless this chat is silenced
     chatPush("%s: %s", from.name, text);
     logf("DM from %s (%s): %s\n", from.name, pkt->isRouteDirect() ? "direct" : "flood", text);
   }
@@ -345,7 +345,10 @@ protected:
     msgs_add_info(convForChannel(ch), false, body, getRTCClock()->getCurrentTime(), MS_RECEIVED, info);
     // The channel is silent unless the owner asked for more (TDOS-006).
     uint8_t policy = cfg().channelSound;
-    if (!reaction && (policy == 2 || (policy == 1 && mention))) audio_play(SND_RECEIVE);
+    const Conv* cv = msgs_conv(convForChannel(ch));
+    uint8_t ov = cv ? sound_override(cv->key) : 0;     // this channel's own setting beats the global policy
+    bool chime = ov == 2 || (ov == 0 && (policy == 2 || (policy == 1 && mention)));
+    if (!reaction && chime) audio_play(SND_RECEIVE);
     chatPush("# %s", text);
     logf("channel msg (hops %d)%s: %s\n", (int)pkt->getPathHashCount(), mention ? " MENTION" : "", text);
   }
